@@ -1,0 +1,11 @@
+[server]
+# File-change events are unreliable in this OneDrive folder; polling makes
+# edited modules such as strategy.py reload without a server restart.
+fileWatcherType = "poll"
+
+[theme]
+base = "dark"
+backgroundColor = "#0b1017"
+secondaryBackgroundColor = "#111821"
+textColor = "#e5e9f0"
+primaryColor = "#2f6fed"
