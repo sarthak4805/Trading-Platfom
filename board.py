@@ -90,7 +90,6 @@ class Mover:
 class OpportunityRow:
     view: StockView
     setup: str
-    risk_reward: float | None
     steps_passed: int
     steps_total: int
     signal: str
@@ -129,7 +128,6 @@ class BoardData:
     day_pnl: float
     capital: float
     pnl_series: list[float]
-    risk_used: float
     rows: list[OpportunityRow]
     sector_cards: list[SectorCard]
     performance: list[SectorCard]
@@ -224,16 +222,6 @@ def default_focus(views: list[StockView], ranked_sectors: list[str], min_names: 
     return ranked_sectors[0]
 
 
-def risk_reward(view: StockView) -> float | None:
-    if view.side == BUY:
-        risk, reward = view.order_price - view.stop, view.target - view.order_price
-    else:
-        risk, reward = view.stop - view.order_price, view.order_price - view.target
-    if not np.isfinite(risk) or risk <= 0:
-        return None
-    return reward / risk
-
-
 def signal_label(view: StockView) -> str:
     if view.status == TRIGGERED:
         return "BUY" if view.side == BUY else "SHORT"
@@ -264,7 +252,6 @@ def opportunity_rows(views: list[StockView], choice: str = "All", limit: int = T
             OpportunityRow(
                 view=view,
                 setup="Gap-up dip buy" if view.side == BUY else "Gap-down pop sell",
-                risk_reward=risk_reward(view),
                 steps_passed=len(view.passed),
                 steps_total=len(view.passed) + len(view.failed),
                 signal=signal_label(view),
@@ -346,7 +333,6 @@ def build_board(
     changes = np.array([view.change_pct for view in views])
     pnl = _pnl_series(day, replay)
     capital = risk.notional_inr * risk.max_daily_trades
-    open_risk = sum(abs(p.entry - p.stop) * p.quantity for p in replay.open_positions)
     return BoardData(
         clock=engine.clock,
         phase=session_phase(engine.clock.time(), strategy),
@@ -362,7 +348,6 @@ def build_board(
         day_pnl=pnl[-1],
         capital=capital,
         pnl_series=pnl,
-        risk_used=open_risk / capital if capital else 0.0,
         rows=opportunity_rows(views, choice),
         sector_cards=cards,
         performance=performance,
@@ -443,9 +428,6 @@ BOARD_CSS = """
 .orb-kpi .sub { font-size: 0.7rem; color: #8b95a5; margin-top: 4px; }
 .orb-kpi .spark { display: block; width: 100%; max-width: 100%; height: 26px; margin-top: 4px; }
 .orb-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #243040; margin-top: 8px; }
-.orb-segs { display: flex; gap: 4px; margin-top: 8px; }
-.orb-segs span { flex: 1; height: 6px; border-radius: 3px; background: #243040; }
-.orb-segs span.on { background: #22c55e; }
 .orb-title { font-size: 0.95rem; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; }
 .orb-subtitle { font-size: 0.74rem; color: #8b95a5; margin-top: 2px; }
 .orb-table-wrap { overflow-x: auto; container-type: inline-size; }
@@ -588,7 +570,6 @@ def _icon(kind: str, color: str) -> str:
         "bars": f"<rect x='11' y='22' width='4' height='8' fill='{color}'/><rect x='18' y='16' width='4' height='14' fill='{color}'/><rect x='25' y='10' width='4' height='20' fill='{color}'/>",
         "trophy": f"<path d='M13 10h14v6a7 7 0 0 1-14 0z' fill='{color}'/><rect x='18' y='22' width='4' height='5' fill='{color}'/><rect x='14' y='27' width='12' height='3' rx='1' fill='{color}'/>",
         "down": f"<path d='M20 30 L11 19 H17 V10 H23 V19 H29 Z' fill='{color}'/>",
-        "target": f"<circle cx='20' cy='20' r='10' fill='none' stroke='{color}' stroke-width='2.5'/><circle cx='20' cy='20' r='5' fill='none' stroke='{color}' stroke-width='2.5'/><circle cx='20' cy='20' r='1.8' fill='{color}'/>",
         "rupee": f"<text x='20' y='27' text-anchor='middle' font-size='19' font-family='Segoe UI, Arial' font-weight='700' fill='{color}'>₹</text>",
     }
     return (
@@ -597,20 +578,8 @@ def _icon(kind: str, color: str) -> str:
     )
 
 
-def donut_svg(share: float, color: str = BLUE) -> str:
-    share = min(max(share, 0.0), 1.0)
-    radius, circumference = 14.0, 2 * np.pi * 14.0
-    return (
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40' width='40' height='40'>"
-        "<rect width='40' height='40' rx='8' fill='#10213d'/>"
-        f"<circle cx='20' cy='20' r='{radius}' fill='none' stroke='#243040' stroke-width='6'/>"
-        f"<circle cx='20' cy='20' r='{radius}' fill='none' stroke='{color}' stroke-width='6' "
-        f"stroke-dasharray='{circumference * share:.2f} {circumference:.2f}' transform='rotate(-90 20 20)'/></svg>"
-    )
-
-
 def render_top(board: BoardData) -> str:
-    """Ticker strip and the six summary cards."""
+    """Ticker strip and the four summary cards."""
     ticks = []
     for item in board.ticker:
         color = GREEN if (item.change_pct or 0) >= 0 else RED
@@ -633,9 +602,6 @@ def render_top(board: BoardData) -> str:
     breadth = "Positive" if board.advancing >= board.declining else "Negative"
     pnl_pct = board.day_pnl / board.capital * 100.0 if board.capital else 0.0
     pnl_color = GREEN if board.day_pnl >= 0 else RED
-    segments = "".join(
-        f"<span class='{'on' if i < board.trades_used else ''}'></span>" for i in range(board.max_trades)
-    )
     kpis = [
         _kpi(
             _icon("bars", GREEN), "Market breadth",
@@ -656,22 +622,10 @@ def render_top(board: BoardData) -> str:
             f"<div class='sub'>{_signed_pct(board.worst.change_pct)}</div>{_img(sparkline_svg(board.worst.series, RED), 'spark')}",
         ),
         _kpi(
-            _icon("target", BLUE), "Active setups", str(board.waiting + board.in_trade),
-            f"<div class='sub'>{board.waiting} waiting · {board.in_trade} in trade</div>"
-            f"<div class='orb-segs' title='Trades used today: {board.trades_used} of {board.max_trades}'>{segments}</div>",
-        ),
-        _kpi(
             _icon("rupee", pnl_color), "Daily P&amp;L (paper)",
             f"<span class='{'up' if board.day_pnl >= 0 else 'down'}'>{'+' if board.day_pnl >= 0 else ''}{_inr(board.day_pnl, 0)}</span>",
             f"<div class='sub'><span class='{'up' if pnl_pct >= 0 else 'down'}'>{pnl_pct:+.2f}%</span> · after default costs</div>"
             f"{_img(sparkline_svg(board.pnl_series, pnl_color), 'spark')}",
-        ),
-        _kpi(
-            _img(donut_svg(board.risk_used), "icon"), "Risk used",
-            f"{board.risk_used * 100:.1f}%",
-            f"<div class='sub'>of paper capital {_inr(board.capital, 0)}</div>"
-            f"<div class='orb-bar'><span style='width:{min(board.risk_used, 1) * 100:.1f}%;background:{GREEN}'></span></div>",
-            icon_is_img=True,
         ),
     ]
     return BOARD_CSS + "<div class='orb'><div class='orb-ticker'>" + "".join(ticks) + "</div><div class='orb-kpis'>" + "".join(kpis) + "</div></div>"
@@ -716,12 +670,11 @@ def render_table(rows: list[OpportunityRow], selected: str | None) -> str:
         "<th>Window high</th><th>Window low</th><th>% change from previous day</th>"
         "<th>Volume</th><th>VWAP</th><th>3-day % change</th>"
         "<th>Suggested buy</th><th>Suggested sell</th><th>SL</th>"
-        "<th>R:R</th><th>Signal</th></tr>"
+        "<th>Signal</th></tr>"
     )
     body = []
     for number, row in enumerate(rows, start=1):
         view = row.view
-        rr = "—" if row.risk_reward is None else f"{row.risk_reward:.1f}"
         if view.side == BUY:
             buy_price, sell_price = view.order_price, view.target
             buy_tip, sell_tip = "Buy here (open − offset)", "Target"
@@ -746,7 +699,6 @@ def render_table(rows: list[OpportunityRow], selected: str | None) -> str:
             f"<td class='num' title='{buy_tip}'>{_num(buy_price)}</td>"
             f"<td class='num' title='{sell_tip}'>{_num(sell_price)}</td>"
             f"<td class='num'>{_num(view.stop)}</td>"
-            f"<td class='num'>{rr}</td>"
             f"<td>{_pill(row.signal)}<span class='orb-steps {'up' if row.steps_passed == row.steps_total else 'muted'}' "
             f"title='PDF steps passed on the latest closed candle'>{row.steps_passed}/{row.steps_total}</span></td>"
             "</tr>"
@@ -941,7 +893,6 @@ def render_plan(view: StockView, notional: float) -> str:
         signal = "NO TRADE"
     passed, total = len(view.passed), len(view.passed) + len(view.failed)
     share = passed / total if total else 0.0
-    rr = risk_reward(view)
     quantity = position_size(view.order_price, notional) if view.order_price > 0 else 0
     return (
         BOARD_CSS
@@ -953,7 +904,6 @@ def render_plan(view: StockView, notional: float) -> str:
         f"<div><div class='k'>{'Buy' if view.side == BUY else 'Sell'} price</div><div class='v'>{_inr(view.order_price)}</div></div>"
         f"<div><div class='k'>Stop loss</div><div class='v down'>{_inr(view.stop)}</div></div>"
         f"<div><div class='k'>Target</div><div class='v up'>{_inr(view.target)}</div></div>"
-        f"<div><div class='k'>Risk / Reward</div><div class='v'>{'—' if rr is None else f'1 : {rr:.1f}'}</div></div>"
         f"<div><div class='k'>Position size</div><div class='v'>{quantity} sh</div></div>"
         "</div></div>"
     )

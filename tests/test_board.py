@@ -83,6 +83,7 @@ def test_board_builds_and_renders_at_any_clock(clock):
     assert all(m.session_volume > config.min_volume for m in data.movers)
     assert all(0.0 <= m.buyer_share <= 1.0 for m in data.movers)
     pages = [board.render_top(data), board.render_table(data.rows, None), board.render_sectors(data), board.render_bottom(data)]
+    assert "Active setups" not in pages[0] and "Risk used" not in pages[0]
     if data.rows:
         view = data.rows[0].view
         chart = board.build_chart(engine.visible(view.symbol), view, config)
@@ -131,8 +132,6 @@ def test_rows_filter_and_sort():
     assert all(r.view.status == WAITING for r in board.opportunity_rows(views, "Waiting"))
     for row in rows:
         assert row.steps_total == 7
-        if row.risk_reward is not None:
-            assert row.risk_reward > 0
 
 
 def test_table_shows_the_step_11_columns_without_setup():
@@ -143,7 +142,7 @@ def test_table_shows_the_step_11_columns_without_setup():
                    "% change from previous day", "Volume", "VWAP", "3-day % change",
                    "Suggested buy", "Suggested sell", "SL"):
         assert f">{header}</th>" in page
-    assert ">Setup</th>" not in page
+    assert ">Setup</th>" not in page and ">R:R</th>" not in page
     view = rows[0].view
     expected_buy = view.order_price if view.side == BUY else view.target
     assert f"{expected_buy:,.2f}" in page
@@ -163,6 +162,6 @@ def test_escaping_and_signal_labels():
     engine, day, screen, views, replay, config, risk = _state(time(10, 50))
     view = views[0]
     view.symbol = "M&M"
-    page = board.render_table([board.OpportunityRow(view, "Gap-up dip buy", None, 3, 7, "NO TRADE")], "M&M")
+    page = board.render_table([board.OpportunityRow(view, "Gap-up dip buy", 3, 7, "NO TRADE")], "M&M")
     assert "M&amp;M" in page and "M&M<" not in page
     assert board.signal_label(view) in {"BUY", "SHORT", "WAIT", "TARGET", "STOPPED", "CLOSED", "NO TRADE"}

@@ -128,7 +128,7 @@ def _today():
 
 @st.cache_resource
 def _token_store() -> dict:
-    """Today's Kite access token, kept in server memory only. Never written to disk or shown."""
+    """Today's Kite access token and the market it feeds, kept in server memory only. Never written to disk or shown."""
     return {}
 
 
@@ -157,8 +157,12 @@ def _live_engine() -> live_data.LiveEngine | None:
     if request_token:
         if st.query_params.get("status") == "success":
             try:
+                token = live_data.exchange_request_token(api_key, api_secret, request_token)
+                if store.get("market") is not None:
+                    store["market"].stop()
+                _live_market.clear()
                 store.clear()
-                store[_today()] = live_data.exchange_request_token(api_key, api_secret, request_token)
+                store[_today()] = token
             except Exception as exc:
                 st.sidebar.error(f"Zerodha login failed: {exc}")
         st.query_params.clear()
@@ -167,6 +171,8 @@ def _live_engine() -> live_data.LiveEngine | None:
         st.sidebar.link_button("Log in with Zerodha", live_data.login_url(api_key), type="primary", width="stretch")
         st.sidebar.caption("Zerodha asks you to log in once a day. The access token stays in this app's memory.")
         st.title("NIFTY 100 Intraday Desk")
+        if st.session_state.pop("login_expired_note", False):
+            st.warning("Your Zerodha login has expired. Zerodha ends every login each morning, so log in again to load today's data.")
         st.link_button("Log in with Zerodha", live_data.login_url(api_key), type="primary")
         st.info(
             "Log in with Zerodha to load market data. After you log in, Zerodha sends you back here and the app "
@@ -175,6 +181,17 @@ def _live_engine() -> live_data.LiveEngine | None:
         )
         return None
     market = _live_market(api_key, access_token)
+    store["market"] = market
+    if getattr(market, "login_expired", False):
+        market.stop()
+        _live_market.clear()
+        store.clear()
+        st.session_state["login_expired_note"] = True
+        st.rerun()
+    if hasattr(market, "needs_new_session") and market.needs_new_session():
+        market.stop()
+        _live_market.clear()
+        st.rerun()
     if st.sidebar.button("Reload Zerodha data", width="stretch"):
         market.stop()
         _live_market.clear()

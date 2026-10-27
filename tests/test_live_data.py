@@ -8,7 +8,7 @@ import pytest
 
 import board
 from backtest import CostAssumptions
-from live_data import IST, LiveEngine, LiveMarket
+from live_data import IST, LiveEngine, LiveMarket, is_login_error
 from risk_manager import RiskConfig
 from strategy import StrategyConfig, build_day, replay_day, screen_day, stock_views
 from universe import Stock
@@ -157,3 +157,33 @@ def test_load_failure_is_reported_not_raised():
     market = _market(datetime(2026, 10, 25, 17, 0, tzinfo=IST), client=Broken())
     assert market.state == "error"
     assert "access_token" in market.message
+    assert not market.login_expired
+
+
+def test_expired_login_is_flagged():
+    class TokenException(Exception):
+        pass
+
+    class Expired(FakeKite):
+        def instruments(self, exchange):
+            raise TokenException("Token is invalid or has expired.")
+
+    market = _market(datetime(2026, 10, 27, 9, 50, tzinfo=IST), client=Expired())
+    assert market.state == "error" and market.login_expired
+    assert is_login_error("WebSocket connection upgrade failed (403 - Forbidden)")
+    assert not is_login_error("Too many requests")
+
+
+def test_a_new_trading_day_asks_for_a_reload_once_its_first_candle_exists():
+    clock = {"now": datetime(2026, 10, 26, 9, 0, tzinfo=IST)}
+    market = LiveMarket(FakeKite(), STOCKS, now=lambda: clock["now"], pause=lambda _s: None)
+    market.load()
+    assert market.session_date == FRIDAY
+    assert not market.needs_new_session()
+    clock["now"] = datetime(2026, 10, 26, 9, 20, tzinfo=IST)
+    assert market.needs_new_session()
+    market.load()
+    assert market.session_date == FRIDAY  # no Monday candles in the fake, like a holiday
+    assert not market.needs_new_session()
+    weekend = _market(datetime(2026, 10, 25, 17, 0, tzinfo=IST))
+    assert not weekend.needs_new_session()

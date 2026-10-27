@@ -25,6 +25,7 @@ INDEX_SYMBOLS = ("NIFTY 100", "NIFTY BANK", "INDIA VIX")
 HISTORY_INTERVAL_SECONDS = 0.36  # Kite allows about 3 historical requests per second.
 HISTORY_WORKERS = 3  # Requests overlap their network wait; the spacing above still caps the rate.
 DAILY_LOOKBACK_DAYS = 14
+FIRST_CANDLE_READY = time(9, 16)  # Kite has today's first minute candle once 09:15-09:16 closes.
 
 LIVE_BANNER = (
     "LIVE DATA from Zerodha Kite Connect (read-only). Candles are built from the exchange feed and "
@@ -53,6 +54,11 @@ def to_ist(moment: datetime) -> datetime:
 
 def floor_minute(moment: datetime) -> datetime:
     return moment.replace(second=0, microsecond=0)
+
+
+def is_login_error(error: object) -> bool:
+    """Kite rejects an expired or invalid access token with TokenException or HTTP 403."""
+    return type(error).__name__ == "TokenException" or "403" in str(error)
 
 
 @dataclass
@@ -105,6 +111,7 @@ class LiveMarket:
         self.last_tick: datetime | None = None
         self.loaded_at: datetime | None = None
         self.ticker: Any = None
+        self.login_expired = False
         self.history: dict[int, list] = {}
         self.history_state = "idle"
         self.history_message = ""
@@ -125,6 +132,7 @@ class LiveMarket:
             self._load()
         except Exception as exc:  # surfaced in the sidebar
             with self.lock:
+                self.login_expired = self.login_expired or is_login_error(exc)
                 self.state = "error"
                 self.message = f"Loading Kite data failed: {exc}"
                 self.errors.append(str(exc))
@@ -226,6 +234,7 @@ class LiveMarket:
         with self.lock:
             if error is not None:
                 self.errors.append(f"{symbol}: {error}")
+                self.login_expired = self.login_expired or is_login_error(error)
                 return
             before = [row for row in daily if pd.Timestamp(row["date"]).date() < self.session_date]
             if before:
@@ -264,9 +273,16 @@ class LiveMarket:
         def on_ticks(_ws, ticks):
             self.apply_ticks(ticks)
 
-        def on_error(_ws, code, reason):
+        def on_error(ws, code, reason):
             with self.lock:
                 self.errors.append(f"Live feed error {code}: {reason}")
+                if is_login_error(reason):
+                    self.login_expired = True
+            if is_login_error(reason):
+                try:
+                    ws.stop_retry()
+                except Exception:
+                    pass
 
         ticker.on_connect = on_connect
         ticker.on_ticks = on_ticks
@@ -362,9 +378,22 @@ class LiveMarket:
         frame["close_3d_ago"] = three
         return frame
 
+    def needs_new_session(self) -> bool:
+        """True once a new trading day has its first candle but this market still holds an older day."""
+        now = self.now()
+        if self.state != "ready" or self.session_date is None or self.session_date >= now.date():
+            return False
+        if now.weekday() >= 5 or now.time() < FIRST_CANDLE_READY:
+            return False
+        opened = datetime.combine(now.date(), FIRST_CANDLE_READY, tzinfo=IST)
+        return self.loaded_at is None or self.loaded_at < opened
+
     def version(self) -> tuple:
         """Changes whenever the screen should refresh."""
-        return (self.state, self.done, self.clock().isoformat(), len(self.errors))
+        return (
+            self.state, self.done, self.clock().isoformat(), len(self.errors),
+            self.login_expired, self.needs_new_session(),
+        )
 
 
 @dataclass

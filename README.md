@@ -41,7 +41,7 @@ The sidebar holds the Zerodha status, the strategy settings from the PDF, the pa
 ### Opening-range board
 
 - A ticker strip with NIFTY 100, NIFTY BANK, and INDIA VIX from Zerodha, and the market clock. If Zerodha returns no index candles, an equal-weight average of the tracked names stands in, labelled "eq-wt".
-- Six cards: market breadth, best and weakest sector, active setups (waiting orders and open trades, with the daily trade limit), daily paper P&L after default costs, and risk used (open stop distance times quantity, as a share of notional × daily trade limit).
+- Four cards: market breadth, best and weakest sector, and daily paper P&L after default costs.
 - **Top opportunities**: candidates from the sector screen plus anything that traded today, with entry, stop, target, reward-to-risk, a signal (BUY or SHORT while in a trade, WAIT for a waiting order, TARGET, STOPPED, CLOSED, or NO TRADE), and how many PDF steps passed. The filter switches between All, Long, Short, and Waiting. Tap a row to open that stock in the chart and trade plan on the right. The step count is not a probability.
 - The chart for the chosen stock in 5-minute or 1-minute candles, with EMA 9 and 21, VWAP, the shaded 15-minute range, and the entry, stop, and target. The EMA lines are for reading the picture only. Below it, the trade plan and a **Review setup** button that lists every step.
 - **Sector momentum** for the five strongest and five weakest sectors today, and **Sector performance** and **movers** cards at the bottom. The movers buyer-share bar is estimated from up-minute volume; it is not the order book.
