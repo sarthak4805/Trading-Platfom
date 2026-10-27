@@ -16,12 +16,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Sequence
 
+import numpy as np
 import pandas as pd
 
 from market_data import IST, SESSION_CLOSE, SESSION_OPEN
-from universe import Stock
+from universe import Stock, with_fo
 
-INDEX_SYMBOLS = ("NIFTY 100", "NIFTY BANK", "INDIA VIX")
+INDEX_SYMBOLS = ("NIFTY 100",)
 HISTORY_INTERVAL_SECONDS = 0.36  # Kite allows about 3 historical requests per second.
 HISTORY_WORKERS = 3  # Requests overlap their network wait; the spacing above still caps the rate.
 DAILY_LOOKBACK_DAYS = 14
@@ -76,7 +77,8 @@ class LiveMarket:
     """Holds one session of minute candles per symbol and keeps today's updated from ticks.
 
     ``client`` is a logged-in KiteConnect. ``ticker_factory`` builds a KiteTicker; pass
-    None in tests to skip the WebSocket. ``now`` returns the current time.
+    None in tests to skip the WebSocket. ``now`` returns the current time. ``fo_list``
+    ('All' or 'NIFTY F&O') replaces ``stocks`` with that list once Zerodha's F&O stocks are known.
     """
 
     def __init__(
@@ -87,9 +89,11 @@ class LiveMarket:
         ticker_factory: Callable[[], Any] | None = None,
         now: Callable[[], datetime] | None = None,
         pause: Callable[[float], None] = clock_time.sleep,
+        fo_list: str | None = None,
     ) -> None:
         self.client = client
         self.stocks = list(stocks)
+        self.fo_list = fo_list
         self.ticker_factory = ticker_factory
         self.now = now or (lambda: datetime.now(IST))
         self.pause = pause
@@ -185,6 +189,17 @@ class LiveMarket:
             for row in instruments
             if row.get("segment") == "INDICES" and row.get("tradingsymbol") in INDEX_SYMBOLS
         }
+        if self.fo_list is not None:
+            self.message = "Downloading Zerodha's F&O list..."
+            names = {row["tradingsymbol"]: str(row.get("name") or "") for row in instruments}
+            fo = {
+                str(row.get("name"))
+                for row in self.client.instruments("NFO")
+                if row.get("segment") == "NFO-FUT" and row.get("name") in equities
+            }
+            if not fo:
+                raise RuntimeError("Zerodha returned no stock futures, so the F&O list is empty.")
+            self.stocks = with_fo(self.fo_list, {symbol: names.get(symbol, "") for symbol in fo})
         with self.lock:
             self.missing = [stock.symbol for stock in self.stocks if stock.symbol not in equities]
             self.available = [stock for stock in self.stocks if stock.symbol in equities]
@@ -192,7 +207,7 @@ class LiveMarket:
             self.tokens.update(indices)
             self.token_symbol = {token: symbol for symbol, token in self.tokens.items()}
         if not self.available:
-            raise RuntimeError("None of the 100 symbols were found in the NSE instrument list.")
+            raise RuntimeError("None of the chosen symbols were found in the NSE instrument list.")
 
         now = self.now()
         self.session_date = self._find_session(now)
@@ -242,7 +257,7 @@ class LiveMarket:
                 self.close_3d_ago[symbol] = float(before[-3]["close"] if len(before) >= 3 else before[0]["close"])
             store = self.candles.setdefault(symbol, {})
             for row in minutes:
-                stamp = floor_minute(to_ist(pd.Timestamp(row["date"]).to_pydatetime()))
+                stamp = floor_minute(_row_time(row["date"]))
                 store[stamp] = [float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0))]
             self.last_volume[token] = sum(candle[4] for candle in store.values())
 
@@ -415,9 +430,15 @@ def session_minutes(session_date: date) -> list[datetime]:
     return [start + timedelta(minutes=i) for i in range(count)]
 
 
+def _row_time(value: Any) -> datetime:
+    """Kite sends datetimes already; other inputs go through pandas, which is far slower per row."""
+    moment = value if isinstance(value, datetime) else pd.Timestamp(value).to_pydatetime()
+    return to_ist(moment)
+
+
 def align_minutes(rows: list[dict], minutes: list[datetime], fallback: float) -> dict[str, list[float]]:
     """Candles on the minute grid. A minute without trades repeats the last close with zero volume."""
-    by_minute = {floor_minute(to_ist(pd.Timestamp(row["date"]).to_pydatetime())): row for row in rows}
+    by_minute = {floor_minute(_row_time(row["date"])): row for row in rows}
     first = next((float(by_minute[m]["open"]) for m in minutes if m in by_minute), fallback)
     out = {name: [] for name in ("open", "high", "low", "close", "volume")}
     last = None
@@ -452,8 +473,7 @@ def load_history(
     minute_end = datetime.combine(last_day, SESSION_CLOSE, tzinfo=IST)
     daily_start = datetime.combine(first_day - timedelta(days=DAILY_LOOKBACK_DAYS), time(0), tzinfo=IST)
     stocks = list(market.available)
-    minute_rows: dict[str, dict[date, list[dict]]] = {}
-    daily_closes: dict[str, list[tuple[date, float]]] = {}
+    by_day: dict[date, dict[str, dict[str, Any]]] = {}
 
     def fetch(stock: Stock):
         token = market.tokens[stock.symbol]
@@ -475,52 +495,39 @@ def load_history(
                 with market.lock:
                     market.errors.append(f"{stock.symbol} history: {error}")
                 continue
-            _keep_history(stock, daily, minutes, daily_closes, minute_rows)
+            _keep_history(stock, daily, minutes, by_day, first_day, last_day)
     if progress is not None:
         progress(len(stocks), len(stocks), "Arranging sessions...")
-    return _sessions(stocks, minute_rows, daily_closes, first_day, last_day)
+    days: list[HistoryDay] = []
+    for session_date in sorted(by_day):
+        arrays = by_day[session_date]
+        included = [stock for stock in stocks if stock.symbol in arrays]
+        days.append(HistoryDay(session_date, session_minutes(session_date), included, arrays))
+    return days
 
 
 def _keep_history(
     stock: Stock,
     daily: list[dict],
     minutes: list[dict],
-    daily_closes: dict[str, list[tuple[date, float]]],
-    minute_rows: dict[str, dict[date, list[dict]]],
-) -> None:
-    daily_closes[stock.symbol] = sorted((pd.Timestamp(r["date"]).date(), float(r["close"])) for r in daily)
-    grouped: dict[date, list[dict]] = {}
-    for row in minutes:
-        grouped.setdefault(pd.Timestamp(row["date"]).date(), []).append(row)
-    minute_rows[stock.symbol] = grouped
-
-
-def _sessions(
-    stocks: list[Stock],
-    minute_rows: dict[str, dict[date, list[dict]]],
-    daily_closes: dict[str, list[tuple[date, float]]],
+    by_day: dict[date, dict[str, dict[str, Any]]],
     first_day: date,
     last_day: date,
-) -> list[HistoryDay]:
-    session_dates = sorted({d for rows in minute_rows.values() for d in rows if first_day <= d <= last_day})
-    days: list[HistoryDay] = []
-    for session_date in session_dates:
-        minutes = session_minutes(session_date)
-        arrays: dict[str, dict[str, Any]] = {}
-        included = []
-        for stock in stocks:
-            rows = minute_rows.get(stock.symbol, {}).get(session_date)
-            before = [close for day, close in daily_closes.get(stock.symbol, []) if day < session_date]
-            if not rows or not before:
-                continue
-            aligned = align_minutes(rows, minutes, before[-1])
-            aligned["prev_close"] = before[-1]
-            aligned["close_3d_ago"] = before[-3] if len(before) >= 3 else before[0]
-            arrays[stock.symbol] = aligned
-            included.append(stock)
-        if included:
-            days.append(HistoryDay(session_date, minutes, included, arrays))
-    return days
+) -> None:
+    """Turn one stock's raw candles into compact per-session arrays right away, so 500 stocks fit in memory."""
+    closes = sorted((_row_time(r["date"]).date(), float(r["close"])) for r in daily)
+    grouped: dict[date, list[dict]] = {}
+    for row in minutes:
+        grouped.setdefault(_row_time(row["date"]).date(), []).append(row)
+    for session_date, rows in grouped.items():
+        before = [close for day, close in closes if day < session_date]
+        if not first_day <= session_date <= last_day or not before:
+            continue
+        aligned = align_minutes(rows, session_minutes(session_date), before[-1])
+        arrays: dict[str, Any] = {name: np.asarray(values, dtype=np.float32) for name, values in aligned.items()}
+        arrays["prev_close"] = before[-1]
+        arrays["close_3d_ago"] = before[-3] if len(before) >= 3 else before[0]
+        by_day.setdefault(session_date, {})[stock.symbol] = arrays
 
 
 class LiveEngine:

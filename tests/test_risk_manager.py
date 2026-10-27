@@ -38,7 +38,7 @@ def test_position_size_is_whole_shares_and_at_least_one() -> None:
 
 def test_limitations_mention_the_stop_gaps_and_no_orders() -> None:
     text = " ".join(RISK_LIMITATIONS).lower()
-    assert "15-minute low" in text
+    assert "window low" in text and "sl %" in text
     assert "gap" in text
     assert "not a verified" in text
     assert "no real order" in text

@@ -76,21 +76,24 @@ def test_board_builds_and_renders_at_any_clock(clock):
     assert data.waiting == sum(1 for v in views if v.status == WAITING)
     assert data.in_trade == sum(1 for v in views if v.status == TRIGGERED)
     assert data.trades_used <= risk.max_daily_trades
-    assert data.pnl_series[-1] == pytest.approx(data.day_pnl)
-    expected = sum(t.net_pnl for t in replay.trades) + sum(p.net_if_closed for p in replay.open_positions)
-    assert data.day_pnl == pytest.approx(expected)
     assert [c.change_pct for c in data.performance] == sorted((c.change_pct for c in data.performance), reverse=True)
     assert all(m.session_volume > config.min_volume for m in data.movers)
     assert all(0.0 <= m.buyer_share <= 1.0 for m in data.movers)
     pages = [board.render_top(data), board.render_table(data.rows, None), board.render_sectors(data), board.render_bottom(data)]
-    assert "Active setups" not in pages[0] and "Risk used" not in pages[0]
+    for removed in ("Active setups", "Risk used", "Daily P&amp;L", "Market clock"):
+        assert removed not in pages[0]
+    assert len(data.ticker) == 1 and ">Time<b>" in pages[0]
     if data.rows:
         view = data.rows[0].view
-        chart = board.build_chart(engine.visible(view.symbol), view, config)
+        frame = engine.visible(view.symbol)
+        chart = board.build_chart(frame, view, config)
         pages += [board.render_chart_head(chart), board.render_chart(chart), board.render_plan(view, risk.notional_inr)]
+        assert f"Open ₹{float(frame['open'].iloc[0]):,.2f}" in pages[-3]
+        assert "Entry price" in pages[-1]
+        assert ">Open<" in board.chart_svg(chart)
     for page in pages:
         assert "<svg" not in page
-    assert "Market clock" in pages[0] and "SIMULATION" not in "".join(pages)
+    assert "SIMULATION" not in "".join(pages)
     if clock == time(9, 25):
         assert data.waiting == 0 and data.in_trade == 0
 
@@ -104,6 +107,23 @@ def test_real_index_tiles_replace_the_equal_weight_fallback():
     assert data.ticker[0].change_points == pytest.approx(float(frame["close"].iloc[-1]) - float(frame["prev_close"].iloc[0]))
     fallback = board.build_board(engine, day, screen, views, replay, config, risk)
     assert "eq-wt" in fallback.ticker[0].label
+
+
+def test_sector_cards_list_the_tapped_sectors_top_five():
+    engine, day, screen, views, replay, config, risk = _state(time(10, 50))
+    data = board.build_board(engine, day, screen, views, replay, config, risk)
+    plain = board.render_sectors(data)
+    assert "data-sector=" in plain and "<div class='orb-sector-stocks'>" not in plain
+    sector = data.sector_cards[0].sector
+    leaders = board.sector_leaders(views, sector)
+    members = [v for v in views if v.sector == sector]
+    assert len(leaders) == min(5, len(members))
+    rising = sum(v.change_pct for v in members) >= 0
+    changes = [v.change_pct for v in leaders]
+    assert changes == sorted(changes, reverse=rising)
+    page = board.render_sectors(data, sector, views)
+    assert "<div class='orb-sector-stocks'>" in page and "orb-sector sel" in page
+    assert all(f"data-symbol='{v.symbol}'" in page for v in leaders)
 
 
 def test_movers_follow_the_chosen_sector():
@@ -138,7 +158,7 @@ def test_table_shows_the_step_11_columns_without_setup():
     engine, day, screen, views, replay, config, risk = _state(time(10, 50))
     rows = board.opportunity_rows(views)
     page = board.render_table(rows, None)
-    for header in ("Price", "Previous day close", "Day high", "Day low", "Window high", "Window low",
+    for header in ("Price", "Previous day close", "Day high", "Day low", "Time Frame High", "Time Frame Low",
                    "% change from previous day", "Volume", "VWAP", "3-day % change",
                    "Suggested buy", "Suggested sell", "SL"):
         assert f">{header}</th>" in page

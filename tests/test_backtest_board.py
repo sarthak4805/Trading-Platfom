@@ -52,6 +52,22 @@ def test_daily_limit_and_one_trade_per_stock_hold_every_session():
         assert len(symbols) == len(set(symbols))
 
 
+def test_single_stock_backtest_keeps_only_that_stocks_trades_from_the_full_replay():
+    history = history_days(STOCKS, WEEKDAYS[-20:], seed=7)
+    everyone = backtest_board.run_history_backtest(history, StrategyConfig(), RiskConfig(), CostAssumptions(), headline_days=60)
+    symbol = everyone.trades[0][1].symbol
+    single = backtest_board.run_history_backtest(
+        history, StrategyConfig(), RiskConfig(), CostAssumptions(), headline_days=60, symbol=symbol
+    )
+    expected = [(d, t) for d, t in everyone.trades if t.symbol == symbol]
+    assert [(d, t.entry_time) for d, t in single.trades] == [(d, t.entry_time) for d, t in expected]
+    assert single.headline.net_pnl == pytest.approx(sum(t.net_pnl for _d, t in expected))
+    assert single.grid[(1.5, 0.5)] == pytest.approx(single.headline.net_pnl)
+    assert len({d for d, _t in expected}) <= single.qualified_sessions <= single.headline.sessions
+    page = backtest_board.render_backtest(single)
+    assert f"{symbol} · PDF strategy" in page and "Full PDF rules" in page
+
+
 class HistoryKite:
     """Fake Kite with several weekdays of minute and daily candles."""
 

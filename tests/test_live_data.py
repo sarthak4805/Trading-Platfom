@@ -146,7 +146,7 @@ def test_live_engine_feeds_the_strategy_and_board():
     assert items[0].change_points == pytest.approx(float(engine.index_frame("NIFTY 100")["close"].iloc[-1]) - 25004.0)
     data = board.build_board(engine, day, screen, views, replay, config, RiskConfig(), ticker_items=items)
     page = board.render_top(data) + board.render_bottom(data)
-    assert "Market clock" in page and "LIVE DATA" in page and "SIMULATION MODE" not in page
+    assert ">Time<b>" in page and "LIVE DATA" in page and "SIMULATION MODE" not in page
 
 
 def test_load_failure_is_reported_not_raised():
@@ -158,6 +158,25 @@ def test_load_failure_is_reported_not_raised():
     assert market.state == "error"
     assert "access_token" in market.message
     assert not market.login_expired
+
+
+def test_fo_list_comes_from_zerodha_stock_futures():
+    class WithFutures(FakeKite):
+        def instruments(self, exchange):
+            if exchange == "NFO":
+                return [
+                    {"tradingsymbol": "AAA26NOVFUT", "name": "AAA", "segment": "NFO-FUT", "instrument_type": "FUT"},
+                    {"tradingsymbol": "CCC26NOVFUT", "name": "CCC", "segment": "NFO-FUT", "instrument_type": "FUT"},
+                    {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "segment": "NFO-FUT", "instrument_type": "FUT"},
+                    {"tradingsymbol": "BBB26NOV100CE", "name": "BBB", "segment": "NFO-OPT", "instrument_type": "CE"},
+                ]
+            return super().instruments(exchange)
+
+    market = LiveMarket(WithFutures(), [], now=lambda: datetime(2026, 10, 25, 17, 0, tzinfo=IST),
+                        pause=lambda _s: None, fo_list="NIFTY F&O")
+    market.load()
+    assert market.state == "ready", market.message
+    assert [stock.symbol for stock in market.available] == ["AAA", "CCC"]
 
 
 def test_expired_login_is_flagged():

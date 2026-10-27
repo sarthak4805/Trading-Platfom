@@ -1,4 +1,4 @@
-"""NIFTY 100 intraday research desk running the bullish / bearish PDF strategy.
+"""NSE intraday research desk running the bullish / bearish PDF strategy.
 
 Prices come from Zerodha Kite Connect (read-only). The app never places,
 modifies, or cancels an order.
@@ -26,10 +26,6 @@ from risk_manager import RISK_LIMITATIONS, RiskConfig, position_size
 from strategy import (
     BUY,
     NO_TRADE,
-    SHORT,
-    TRIGGERED,
-    WAITING,
-    DayReplay,
     StockView,
     StrategyConfig,
     build_day,
@@ -37,10 +33,10 @@ from strategy import (
     screen_day,
     stock_views,
 )
-from universe import UNIVERSE, UNIVERSE_DISCLAIMER, all_sectors
+from universe import DEFAULT_LIST, FO_LISTS, LIST_CHOICES, UNIVERSE_DISCLAIMER, index_stocks
 
 st.set_page_config(
-    page_title="NIFTY 100 Intraday Desk",
+    page_title="NSE Intraday Desk",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -54,13 +50,30 @@ PAGE_CSS = """
 """
 load_dotenv(override=False)
 
+def _trigger(key: str, name: str):
+    state = st.session_state.get(key)
+    if state is None:
+        return None
+    return state.get(name) if hasattr(state, "get") else getattr(state, name, None)
+
+
 def _on_table_click() -> None:
-    state = st.session_state.get("orb_table")
-    clicked = None
-    if state is not None:
-        clicked = state.get("clicked") if hasattr(state, "get") else getattr(state, "clicked", None)
+    clicked = _trigger("orb_table", "clicked")
     if clicked:
         st.session_state["board_chart"] = clicked
+
+
+def _on_sector_stock_click() -> None:
+    clicked = _trigger("orb_sectors", "clicked")
+    if clicked:
+        st.session_state["board_chart"] = clicked
+
+
+def _on_sector_click() -> None:
+    sector = _trigger("orb_sectors", "sector")
+    if sector:
+        same = st.session_state.get("board_sector_pick") == sector
+        st.session_state["board_sector_pick"] = None if same else sector
 
 
 def main() -> None:
@@ -85,40 +98,23 @@ def _render() -> None:
     market = _market(engine, strategy, risk)
     views: list[StockView] = market["views"]
 
-    board_tab, overview, screener, sectors, detail, signals, backtest = st.tabs(
-        [
-            "Opening-range board",
-            "Market overview",
-            "Stock screener",
-            "Sector analysis",
-            "Stock detail",
-            "Signals",
-            "Backtesting",
-        ]
+    board_tab, overview, detail, backtest = st.tabs(
+        ["Opening-range board", "Market overview", "Stock detail", "Backtesting"]
     )
     with board_tab:
         _board(engine, market, strategy, risk)
     with overview:
         _banner()
         _overview(engine, views)
-    with screener:
-        _banner()
-        _screener(views)
-    with sectors:
-        _banner()
-        _sectors(views)
     with detail:
         _banner()
         _detail(engine, strategy, risk, views)
-    with signals:
-        _banner()
-        _signals(views, market["replay"], strategy, risk)
     with backtest:
-        _backtest(engine, strategy, risk)
+        _backtest(engine, strategy, risk, views)
 
 
 def _banner() -> None:
-    st.caption("NIFTY 100 intraday research and paper-trading desk. No broker orders are sent.")
+    st.caption("NSE intraday research and paper-trading desk. No broker orders are sent.")
     st.info(live_data.LIVE_BANNER)
 
 
@@ -133,14 +129,31 @@ def _token_store() -> dict:
 
 
 @st.cache_resource(show_spinner=False)
-def _live_market(api_key: str, access_token: str) -> live_data.LiveMarket:
+def _live_market(api_key: str, access_token: str, stock_list: str) -> live_data.LiveMarket:
     from kiteconnect import KiteConnect, KiteTicker
 
     client = KiteConnect(api_key=api_key)
     client.set_access_token(access_token)
-    market = live_data.LiveMarket(client, UNIVERSE, ticker_factory=lambda: KiteTicker(api_key, access_token))
+    market = live_data.LiveMarket(
+        client,
+        index_stocks(stock_list),
+        ticker_factory=lambda: KiteTicker(api_key, access_token),
+        fo_list=stock_list if stock_list in FO_LISTS else None,
+    )
     market.start()
     return market
+
+
+def _stock_list() -> str:
+    """Sidebar choice of which NSE list to scan. Changing it reloads that list from Zerodha."""
+    return st.sidebar.selectbox(
+        "Stock list",
+        LIST_CHOICES,
+        index=LIST_CHOICES.index(DEFAULT_LIST),
+        key="stock_list",
+        help="All is NIFTY 500 plus any F&O stock outside it. Bigger lists take longer to load: "
+        "Zerodha allows about 3 history requests a second.",
+    )
 
 
 def _live_engine() -> live_data.LiveEngine | None:
@@ -170,7 +183,7 @@ def _live_engine() -> live_data.LiveEngine | None:
     if access_token is None:
         st.sidebar.link_button("Log in with Zerodha", live_data.login_url(api_key), type="primary", width="stretch")
         st.sidebar.caption("Zerodha asks you to log in once a day. The access token stays in this app's memory.")
-        st.title("NIFTY 100 Intraday Desk")
+        st.title("NSE Intraday Desk")
         if st.session_state.pop("login_expired_note", False):
             st.warning("Your Zerodha login has expired. Zerodha ends every login each morning, so log in again to load today's data.")
         st.link_button("Log in with Zerodha", live_data.login_url(api_key), type="primary")
@@ -180,7 +193,14 @@ def _live_engine() -> live_data.LiveEngine | None:
             "for example `http://127.0.0.1:8501/`. Log in again each day."
         )
         return None
-    market = _live_market(api_key, access_token)
+    stock_list = _stock_list()
+    if store.get("stock_list") not in (None, stock_list):
+        if store.get("market") is not None:
+            store["market"].stop()
+        _live_market.clear()
+        st.session_state.pop("market_key", None)
+    store["stock_list"] = stock_list
+    market = _live_market(api_key, access_token, stock_list)
     store["market"] = market
     if getattr(market, "login_expired", False):
         market.stop()
@@ -211,12 +231,17 @@ def _live_engine() -> live_data.LiveEngine | None:
         st.title("Loading Zerodha data")
         share = market.done / market.total if market.total else 0.0
         st.progress(share, text=market.message)
-        st.caption("Zerodha allows about 3 history requests a second, so the first load takes under a minute.")
+        if market.total:
+            seconds = market.total * 2 * live_data.HISTORY_INTERVAL_SECONDS
+            st.caption(
+                f"{stock_list}: {market.total} symbols. Zerodha allows about 3 history requests a second, "
+                f"so this load takes about {max(1, round(seconds / 60))} minute(s)."
+            )
         return None
     engine = live_data.LiveEngine(market)
     if hasattr(market, "prefetch_history"):
         market.prefetch_history(max(backtest_board.PERIOD_DAYS))
-    st.sidebar.success(f"Connected. Session {engine.session_date:%d %b %Y}, {len(engine.stocks)} stocks.")
+    st.sidebar.success(f"Connected. {stock_list}, session {engine.session_date:%d %b %Y}, {len(engine.stocks)} stocks.")
     if market.last_tick is not None:
         st.sidebar.caption(f"Last live tick {market.last_tick:%H:%M:%S}.")
     elif engine.session_complete:
@@ -275,11 +300,15 @@ def _market(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: RiskCo
     return market
 
 
+def _sector_names(engine: live_data.LiveEngine) -> list[str]:
+    return sorted({stock.sector for stock in engine.stocks})
+
+
 def _board(engine: live_data.LiveEngine, market: dict, strategy: StrategyConfig, risk: RiskConfig) -> None:
     views: list[StockView] = market["views"]
     choice = st.session_state.get("opp_filter") or "All"
     st.sidebar.header("Board")
-    focus = st.sidebar.selectbox("Movers sector", ["Strongest sector"] + all_sectors(), key="board_sector")
+    focus = st.sidebar.selectbox("Movers sector", ["Strongest sector"] + _sector_names(engine), key="board_sector")
     indices = board.index_ticker({label: engine.index_frame(label) for label in live_data.INDEX_SYMBOLS})
     data = board.build_board(
         engine, market["day"], market["screen"], views, market["replay"], strategy, risk, choice,
@@ -302,7 +331,7 @@ def _board(engine: live_data.LiveEngine, market: dict, strategy: StrategyConfig,
             controls.segmented_control(
                 "Filter", ["All", "Long", "Short", "Waiting"], default="All", key="opp_filter", label_visibility="collapsed"
             )
-            board.OPPORTUNITY_TABLE(
+            board.CLICKABLE_HTML(
                 data=board.render_table(data.rows, selected), key="orb_table", on_clicked_change=_on_table_click
             )
             st.caption("Tap a row to show that stock's candles and trade plan on the right. Scroll the table sideways to see every column.")
@@ -319,22 +348,57 @@ def _board(engine: live_data.LiveEngine, market: dict, strategy: StrategyConfig,
             with st.popover("Review setup →", type="primary", width="stretch"):
                 st.markdown(f"**{view.symbol} — {view.summary}**")
                 _rule_lists(view)
-    st.html(board.render_sectors(data))
+    board.CLICKABLE_HTML(
+        data=board.render_sectors(data, st.session_state.get("board_sector_pick"), views, selected),
+        key="orb_sectors",
+        on_sector_change=_on_sector_click,
+        on_clicked_change=_on_sector_stock_click,
+    )
     st.html(board.render_bottom(data))
+
+
+PERCENT_STEPS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0)
+VOLUME_CHOICES = {"All": 0, "More than 1 lakh": 100_000, "More than 5 lakh": 500_000, "More than 10 lakh": 1_000_000}
+WINDOW_MINUTES = (5, 15, 30, 60)
+
+
+def _pct(value: float) -> str:
+    return f"{value:g} %"
 
 
 def _strategy_controls() -> tuple[StrategyConfig, RiskConfig]:
     st.sidebar.header("Strategy (PDF)")
     st.sidebar.caption("A buy or short needs every step. Otherwise the result is NO TRADE.")
+    window = st.sidebar.selectbox(
+        "Time frame (opening window)",
+        WINDOW_MINUTES,
+        index=WINDOW_MINUTES.index(15),
+        format_func=lambda minutes: f"{minutes} minutes",
+        help="The high and low of this window after the open set the PDF stop-loss. Orders are allowed once it ends. "
+        "The PDF uses 15 minutes (09:15 to 09:30).",
+    )
     sectors_each_side = int(st.sidebar.number_input("Sectors to use (top for buys, bottom for shorts)", min_value=1, max_value=9, value=3, step=1))
     stocks_per_sector = int(st.sidebar.number_input("Stocks per sector", min_value=1, max_value=10, value=5, step=1))
     min_change = st.sidebar.number_input("Minimum change from yesterday's close (%)", min_value=0.0, max_value=10.0, value=1.5, step=0.1)
-    min_volume = int(st.sidebar.number_input("Minimum volume today (shares)", min_value=0, max_value=100_000_000, value=1_000_000, step=100_000))
-    entry_offset = st.sidebar.number_input("Buy/sell distance from the open (%)", min_value=0.0, max_value=3.0, value=0.5, step=0.05)
-    target = st.sidebar.number_input("Target from the buy/sell price (%)", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
+    volume_label = st.sidebar.selectbox("Volume today", list(VOLUME_CHOICES), index=3, help="The PDF uses more than 10 lakh shares.")
+    entry_offset = st.sidebar.selectbox(
+        "Buy at (% below the open; shorts above)", PERCENT_STEPS, index=0, format_func=_pct, help="The PDF uses 0.5 %."
+    )
+    stop_choice = st.sidebar.selectbox(
+        "SL (stop-loss)",
+        (None,) + PERCENT_STEPS,
+        index=0,
+        format_func=lambda value: "Time Frame Low / High (PDF)" if value is None else f"{value:g} % from the buy/sell price",
+        help="The PDF puts the stop at the opening-window low for a buy and the high for a short.",
+    )
+    target = st.sidebar.selectbox(
+        "Book profit (% from the buy/sell price)", PERCENT_STEPS, index=PERCENT_STEPS.index(1.5), format_func=_pct,
+        help="The PDF uses 1.5 %.",
+    )
     with st.sidebar.expander("Times"):
-        observation = st.time_input("15-minute window starts", value=datetime.strptime("09:15", "%H:%M").time())
-        signal_start = st.time_input("15-minute window ends (orders allowed from)", value=datetime.strptime("09:30", "%H:%M").time())
+        observation = st.time_input("Opening window starts", value=datetime.strptime("09:15", "%H:%M").time())
+        signal_start = (datetime.combine(datetime.now().date(), observation) + timedelta(minutes=window)).time()
+        st.caption(f"The window ends and orders are allowed from {signal_start:%H:%M}.")
         no_entries_after = st.time_input(
             "No new entries after",
             value=datetime.strptime("15:00", "%H:%M").time(),
@@ -346,9 +410,10 @@ def _strategy_controls() -> tuple[StrategyConfig, RiskConfig]:
             sectors_each_side=sectors_each_side,
             stocks_per_sector=stocks_per_sector,
             min_change_pct=float(min_change),
-            min_volume=min_volume,
+            min_volume=VOLUME_CHOICES[volume_label],
             entry_offset_pct=float(entry_offset),
             target_pct=float(target),
+            stop_pct=None if stop_choice is None else float(stop_choice),
             observation_start=observation,
             signal_start=signal_start,
             no_new_entries_after=no_entries_after,
@@ -360,7 +425,7 @@ def _strategy_controls() -> tuple[StrategyConfig, RiskConfig]:
         strategy = st.session_state.get("strategy", StrategyConfig())
 
     st.sidebar.header("Risk")
-    st.sidebar.caption("The stop-loss is set by the strategy: the 15-minute low for a buy, the 15-minute high for a short.")
+    st.sidebar.caption(f"The stop-loss is {strategy.stop_text(True)} for a buy and {strategy.stop_text(False)} for a short.")
     max_trades = int(st.sidebar.number_input("Maximum hypothetical trades per day", min_value=1, max_value=20, value=5, step=1))
     notional = st.sidebar.number_input("Hypothetical notional per trade (INR)", min_value=10_000.0, max_value=10_000_000.0, value=100_000.0, step=10_000.0)
     try:
@@ -442,81 +507,6 @@ def _overview(engine: live_data.LiveEngine, views: list[StockView]) -> None:
     st.info(UNIVERSE_DISCLAIMER)
 
 
-def _screener(views: list[StockView]) -> None:
-    st.subheader("Stock screener")
-    st.caption("Change is from the previous session's close. Signals are paper signals, not advice.")
-    table = _table(views)
-    search = st.text_input("Search symbol or company", value="")
-    sectors = st.multiselect("Sectors", options=all_sectors(), default=[])
-    signal_filter = st.selectbox("Signal", options=["All", BUY, SHORT, NO_TRADE])
-    sort_by = st.selectbox("Sort", options=["Percentage gain", "Percentage loss", "Volume", "Sector"])
-    filtered = table
-    if search.strip():
-        needle = search.strip().lower()
-        filtered = filtered[
-            filtered["Symbol"].str.lower().str.contains(needle, regex=False)
-            | filtered["Company"].str.lower().str.contains(needle, regex=False)
-        ]
-    if sectors:
-        filtered = filtered[filtered["Sector"].isin(sectors)]
-    if signal_filter != "All":
-        filtered = filtered[filtered["Signal"] == signal_filter]
-    if sort_by == "Percentage gain":
-        filtered = filtered.sort_values("Change %", ascending=False)
-    elif sort_by == "Percentage loss":
-        filtered = filtered.sort_values("Change %", ascending=True)
-    elif sort_by == "Volume":
-        filtered = filtered.sort_values("Volume", ascending=False)
-    else:
-        filtered = filtered.sort_values(["Sector", "Symbol"])
-    st.dataframe(filtered, width="stretch", hide_index=True)
-    if filtered.empty:
-        st.info("Nothing matches those filters. Clear the search or choose All signals.")
-    gainers, losers = st.columns(2)
-    columns = ["Symbol", "Company", "Sector", "Price", "Change %", "Signal"]
-    with gainers:
-        st.markdown("**Top 10 gainers**")
-        st.dataframe(table.nlargest(10, "Change %")[columns], width="stretch", hide_index=True)
-    with losers:
-        st.markdown("**Top 10 losers**")
-        st.dataframe(table.nsmallest(10, "Change %")[columns], width="stretch", hide_index=True)
-    st.caption("Gainers and losers are ranked on the full tracked list, before the filters above.")
-
-
-def _sectors(views: list[StockView]) -> None:
-    st.subheader("Sector analysis")
-    st.caption("Step 1 of the strategy: buys come from the strongest sectors, shorts from the weakest.")
-    st.caption(UNIVERSE_DISCLAIMER)
-    table = _table(views)
-    summary = (
-        table.groupby("Sector")
-        .agg(
-            Names=("Symbol", "count"),
-            **{
-                "Average change %": ("Change %", "mean"),
-                "Advancing": ("Change %", lambda values: int((values > 0).sum())),
-                "Declining": ("Change %", lambda values: int((values < 0).sum())),
-            },
-        )
-        .reset_index()
-        .sort_values("Average change %", ascending=False)
-    )
-    summary.insert(0, "Rank", range(1, len(summary) + 1))
-    st.dataframe(summary, width="stretch", hide_index=True)
-    chart = go.Figure(
-        go.Bar(x=summary["Average change %"], y=summary["Sector"], orientation="h", name="Average change %")
-    )
-    chart.update_layout(
-        template="plotly_dark",
-        height=520,
-        title="Average change from the previous close, by sector",
-        xaxis_title="Average change %",
-        yaxis={"categoryorder": "total ascending"},
-        margin=dict(l=10, r=10, t=50, b=10),
-    )
-    st.plotly_chart(chart, width="stretch")
-
-
 def _step_table(views: list[StockView], side: str) -> pd.DataFrame:
     """Step 11 of the PDF: the per-stock table."""
     buy = side == BUY
@@ -530,8 +520,8 @@ def _step_table(views: list[StockView], side: str) -> pd.DataFrame:
                 "Previous day close": round(view.prev_close, 2),
                 "Day high": round(view.day_high, 2),
                 "Day low": round(view.day_low, 2),
-                "Window high": round(view.window_high, 2),
-                "Window low": round(view.window_low, 2),
+                "Time Frame High": round(view.window_high, 2),
+                "Time Frame Low": round(view.window_low, 2),
                 "% change from previous day": round(view.change_pct, 2),
                 "Volume": view.volume,
                 "VWAP": round(view.vwap, 2),
@@ -556,80 +546,7 @@ def _rule_lists(view: StockView) -> None:
             st.write(f"✗ {rule.rule_id}: {rule.detail}")
 
 
-def _signals(views: list[StockView], replay: DayReplay, strategy: StrategyConfig, risk: RiskConfig) -> None:
-    st.subheader("Signals")
-    st.caption(
-        "A stock gets a BUY or SHORT-SELL order only when every PDF step passes on the latest closed candle. "
-        "The order then waits for the price to reach the suggested level. NO TRADE is the normal result."
-    )
-    buys = sum(1 for view in views if view.status == WAITING and view.side == BUY)
-    shorts = sum(1 for view in views if view.status == WAITING and view.side == SHORT)
-    open_now = sum(1 for view in views if view.status == TRIGGERED)
-    closed = len(replay.trades)
-    _stat_row(
-        [
-            ("Buy orders waiting", str(buys)),
-            ("Short orders waiting", str(shorts)),
-            ("Open trades", str(open_now)),
-            ("Closed trades today", str(closed)),
-            ("Daily limit", f"{len(replay.trades) + len(replay.open_positions)} of {risk.max_daily_trades}"),
-        ]
-    )
-    if replay.skipped_by_limit:
-        st.caption(f"{replay.skipped_by_limit} order(s) would have filled after the daily limit was reached, so they were skipped.")
-
-    bull = sorted((v for v in views if v.in_candidate_list and v.side == BUY), key=lambda v: (v.sector_rank, v.rank_in_sector))
-    bear = sorted((v for v in views if v.in_candidate_list and v.side == SHORT), key=lambda v: (-v.sector_rank, v.rank_in_sector))
-    st.markdown(
-        f"**Bullish candidates:** top {strategy.stocks_per_sector} gainers in the {strategy.sectors_each_side} strongest sectors"
-    )
-    if bull:
-        st.dataframe(_step_table(bull, BUY), width="stretch", hide_index=True)
-    else:
-        st.info("No stock is a top gainer in a top sector right now.")
-    st.markdown(
-        f"**Bearish candidates:** top {strategy.stocks_per_sector} losers in the {strategy.sectors_each_side} weakest sectors"
-    )
-    if bear:
-        st.dataframe(_step_table(bear, SHORT), width="stretch", hide_index=True)
-    else:
-        st.info("No stock is a top loser in a bottom sector right now.")
-
-    traded = [view for view in views if view.trade is not None or view.position is not None]
-    st.markdown("**Trades today**")
-    if traded:
-        rows = []
-        for view in traded:
-            if view.trade is not None:
-                trade = view.trade
-                rows.append({
-                    "Symbol": view.symbol, "Side": trade.side, "Status": view.status,
-                    "Entry time": trade.entry_time.strftime("%H:%M"), "Entry": round(trade.entry_raw, 2),
-                    "Stop-loss": round(trade.stop_loss, 2), "Target": round(trade.target, 2),
-                    "Exit time": trade.exit_time.strftime("%H:%M"), "Exit": round(trade.exit_raw, 2),
-                    "Quantity": trade.quantity, "Net P&L": round(trade.net_pnl, 2),
-                })
-            else:
-                position = view.position
-                rows.append({
-                    "Symbol": view.symbol, "Side": position.side, "Status": TRIGGERED,
-                    "Entry time": position.entry_time.strftime("%H:%M"), "Entry": round(position.entry, 2),
-                    "Stop-loss": round(position.stop, 2), "Target": round(position.target, 2),
-                    "Exit time": "open", "Exit": round(position.mark, 2),
-                    "Quantity": position.quantity, "Net P&L": round(position.net_if_closed, 2),
-                })
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-        st.caption("Net P&L uses the default cost assumptions. Open trades are valued as if closed at the last price.")
-    else:
-        st.info("No order has filled yet today.")
-
-    st.markdown("**Read the steps for one stock**")
-    ordered = sorted(views, key=lambda v: (v.status is None, not v.in_candidate_list, v.symbol))
-    chosen = st.selectbox("Stock", [view.symbol for view in ordered], key="signals_symbol")
-    view = next(v for v in views if v.symbol == chosen)
-    st.markdown(f"**{view.symbol} — checked as a {'buy' if view.side == BUY else 'short'}**")
-    st.write(view.summary)
-    _rule_lists(view)
+def _strategy_steps(strategy: StrategyConfig, risk: RiskConfig) -> None:
     with st.expander("The strategy steps (from the PDF)"):
         st.write(
             f"1. Rank sectors by average change from yesterday's close. Buys use the top {strategy.sectors_each_side}, "
@@ -641,7 +558,7 @@ def _signals(views: list[StockView], replay: DayReplay, strategy: StrategyConfig
             f"6. At {strategy.signal_start:%H:%M}, mark the high and low since {strategy.observation_start:%H:%M}.  \n"
             f"7. Buy at the open minus {strategy.entry_offset_pct:g}% (short: open plus {strategy.entry_offset_pct:g}%). "
             "The order fills only when a later candle trades at that price.  \n"
-            "8. Stop-loss at the 15-minute low (short: the 15-minute high).  \n"
+            f"8. Stop-loss at {strategy.stop_text(True)} (short: {strategy.stop_text(False)}).  \n"
             f"9. Target {strategy.target_pct:g}% above the buy price (short: below the sell price).  \n"
             "10. Buy only above VWAP; short only below VWAP.  \n"
             f"No new entries after {strategy.no_new_entries_after:%H:%M}. Everything closes at {strategy.session_end:%H:%M}. "
@@ -674,11 +591,12 @@ def _detail(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: RiskCo
     st.dataframe(_step_table([view], view.side), width="stretch", hide_index=True)
     st.markdown(f"**{view.summary}**")
     _rule_lists(view)
+    _strategy_steps(strategy, risk)
     word = "buy" if view.side == BUY else "short-sell"
     quantity = position_size(view.order_price, risk.notional_inr)
     st.info(
         f"Hypothetical {word} plan: order at {view.order_price:.2f}, stop-loss {view.stop:.2f} "
-        f"(15-minute {'low' if view.side == BUY else 'high'}), target {view.target:.2f}. "
+        f"({strategy.stop_text(view.side == BUY)}), target {view.target:.2f}. "
         f"Quantity {quantity} at a notional of {risk.notional_inr:,.0f} INR. This is not an order."
     )
     for note in RISK_LIMITATIONS:
@@ -711,7 +629,8 @@ def _chart(frame: pd.DataFrame, strategy: StrategyConfig, view: StockView) -> go
         (float(frame["open"].iloc[0]), "#8b939e", "Open"),
         (view.order_price, "#3ecf8e", f"{'Buy' if buy else 'Sell'} {'-' if buy else '+'}{strategy.entry_offset_pct:g}%"),
         (view.target, "#3ecf8e", f"Target {'+' if buy else '-'}{strategy.target_pct:g}%"),
-        (view.stop, "#f0716f", f"Stop 15m {'low' if buy else 'high'}"),
+        (view.stop, "#f0716f", f"Stop {strategy.window_minutes}m {'low' if buy else 'high'}" if strategy.stop_pct is None
+         else f"Stop {'-' if buy else '+'}{strategy.stop_pct:g}%"),
     ]
     for price, color, label in levels:
         if price == price:
@@ -726,7 +645,7 @@ def _chart(frame: pd.DataFrame, strategy: StrategyConfig, view: StockView) -> go
     figure.update_layout(
         template="plotly_dark",
         height=620,
-        title="One-minute candles, VWAP, 15-minute range, and order levels",
+        title=f"One-minute candles, VWAP, {strategy.window_minutes}-minute range, and order levels",
         xaxis_rangeslider_visible=False,
         legend={"orientation": "h"},
         margin=dict(l=10, r=10, t=50, b=10),
@@ -752,14 +671,25 @@ def _history_progress(market: live_data.LiveMarket) -> None:
     st.fragment(run_every=timedelta(seconds=2))(_show)()
 
 
-def _backtest(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: RiskConfig) -> None:
+def _backtest(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: RiskConfig, views: list[StockView]) -> None:
     market = engine.market
     longest = max(backtest_board.PERIOD_DAYS)
     # A market loaded by an older version of this module may not have the history store yet.
     store = market.__dict__.setdefault("history", {})
     history = store.get(longest)
     downloading = history is None and getattr(market, "history_state", "") == "running"
-    c1, c2, c3 = st.columns([2, 2, 1.4], vertical_alignment="bottom")
+    screener = [row.view.symbol for row in board.opportunity_rows(views, st.session_state.get("opp_filter") or "All")]
+    if st.session_state.get("mbt_stock") not in ["All stocks"] + screener:
+        st.session_state["mbt_stock"] = "All stocks"
+    c0, c1, c2, c3 = st.columns([2, 1.6, 1.6, 1.3], vertical_alignment="bottom")
+    stock = c0.selectbox(
+        "Stock",
+        ["All stocks"] + screener,
+        key="mbt_stock",
+        help="The stocks in the Screener table on the Opening-range board. A single stock uses the full PDF rules, "
+        "so it only trades on days it was in the top sectors and a top mover of its sector.",
+    )
+    symbol = None if stock == "All stocks" else stock
     bar_label = c1.selectbox("Candle size", ["5-minute", "1-minute"], key="mbt_bars")
     headline_days = c2.selectbox(
         "Period for cards, curve, and grid",
@@ -796,6 +726,7 @@ def _backtest(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: Risk
         {
             "bars": bar_minutes,
             "days": headline_days,
+            "symbol": symbol,
             "market": id(market),
             "strategy": {name: str(value) for name, value in asdict(strategy).items()},
             "risk": {name: str(value) for name, value in asdict(risk).items()},
@@ -827,6 +758,7 @@ def _backtest(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: Risk
                 bar_minutes=bar_minutes,
                 headline_days=int(headline_days),
                 progress=lambda done, total: progress.progress(done / total, text=f"Replaying session {done} of {total}"),
+                symbol=symbol,
             )
             st.session_state["mbt_result"] = (key, result)
             st.session_state.pop("mbt_error", None)
@@ -878,7 +810,8 @@ def _backtest(engine: live_data.LiveEngine, strategy: StrategyConfig, risk: Risk
                 hide_index=True,
             )
         else:
-            st.write("No hypothetical trades. NO TRADE was the outcome on every session.")
+            who = result.symbol or "Any stock"
+            st.write(f"No hypothetical trades. {who} got NO TRADE on every session in this period.")
     if result.skipped_by_limit:
         st.caption(f"{result.skipped_by_limit} fills were skipped because the daily trade limit was already reached.")
 

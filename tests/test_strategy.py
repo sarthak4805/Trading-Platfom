@@ -187,6 +187,28 @@ def test_window_low_above_the_buy_price_cannot_be_a_stop() -> None:
     assert "Steps 6-8" in {rule.rule_id for rule in view.failed}
 
 
+def test_percentage_stop_replaces_the_window_stop() -> None:
+    bars = [(100.0, 100.2, 99.6, 99.8, 10_000)] + [(99.8, 100.0, 99.6, 99.8, 10_000)] * 14
+    bars += [(99.8, 99.9, 99.6, 99.8, 10_000), (99.8, 99.9, 99.4, 99.5, 10_000)]
+    config = replace(CONFIG, stop_pct=1.0)
+    day = build_day(_frames(AAA=_frame(bars, 97.0)), STOCKS, config)
+    entries = entry_levels(day, config, screen_day(day, config))
+    assert np.allclose(entries.buy_stop, np.round(entries.buy_price * 0.99, 2))
+    assert np.allclose(entries.short_stop, np.round(entries.short_price * 1.01, 2))
+    assert entries.buy_stop_ok.all() and entries.short_stop_ok.all()
+    assert config.stop_text() == "1% below the buy price" and CONFIG.stop_text(False) == "the 15-minute high"
+    with pytest.raises(ValueError):
+        replace(CONFIG, stop_pct=0.0)
+
+
+def test_window_length_follows_the_window_end() -> None:
+    config = replace(CONFIG, signal_start=time(9, 45))
+    assert config.window_minutes == 30
+    day = build_day(_frames(), STOCKS, config)
+    assert screen_day(day, config).in_window[day.times.index(time(9, 45))]
+    assert not screen_day(day, config).in_window[day.times.index(time(9, 44))]
+
+
 @pytest.mark.parametrize(
     "config",
     [

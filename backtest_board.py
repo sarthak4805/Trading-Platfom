@@ -55,6 +55,9 @@ class MultiDayResult:
     target_pct: float
     first_session: date | None
     last_session: date | None
+    stop_text: str = "the 15-minute low or high"
+    symbol: str | None = None
+    qualified_sessions: int = 0
 
 
 def window_start(days: int, last_session: date) -> date:
@@ -88,11 +91,14 @@ def run_history_backtest(
     grid_targets: tuple[float, ...] = GRID_TARGETS,
     grid_offsets: tuple[float, ...] = GRID_OFFSETS,
     progress: ProgressFn | None = None,
+    symbol: str | None = None,
 ) -> MultiDayResult:
     """Replay every downloaded session in the longest period across all stocks.
 
     Each session is screened and replayed with the sidebar settings, then once per
     target and entry-offset cell. Positions never carry over to the next session.
+    With ``symbol`` every stock is still replayed, because the sector ranking and the
+    daily trade limit depend on all of them, but only that stock's trades are counted.
     """
     if bar_minutes not in (1, 5):
         raise ValueError("Candle size must be 1 or 5 minutes.")
@@ -110,18 +116,29 @@ def run_history_backtest(
     daily_net: dict[date, float] = {}
     grid = {cell: 0.0 for cell in grid_configs}
     skipped = 0
+    qualified = 0
+
+    def counted(day_trades: list[Trade]) -> list[Trade]:
+        return day_trades if symbol is None else [trade for trade in day_trades if trade.symbol == symbol]
+
     for step, session in enumerate(sessions, start=1):
         day = day_from_arrays(session.stamps, session.arrays, session.stocks, strategy, bar_minutes)
         screen = screen_day(day, strategy)
         replay = replay_day(day, strategy, risk, costs, session_over=True, screen=screen)
-        trades.extend((session.session_date, trade) for trade in replay.trades)
-        daily_net[session.session_date] = sum(trade.net_pnl for trade in replay.trades)
+        kept = counted(replay.trades)
+        trades.extend((session.session_date, trade) for trade in kept)
+        daily_net[session.session_date] = sum(trade.net_pnl for trade in kept)
         if session.session_date >= headline_start:
-            skipped += replay.skipped_by_limit
+            if symbol is None:
+                skipped += replay.skipped_by_limit
+            elif symbol in day.symbols:
+                row = day.index(symbol)
+                picked = (screen.bull_sector[row] & screen.bull_top[row]) | (screen.bear_sector[row] & screen.bear_top[row])
+                qualified += bool((picked & screen.in_window).any())
             for cell, cell_config in grid_configs.items():
                 grid[cell] += sum(
                     trade.net_pnl
-                    for trade in replay_day(day, cell_config, risk, costs, session_over=True, screen=screen).trades
+                    for trade in counted(replay_day(day, cell_config, risk, costs, session_over=True, screen=screen).trades)
                 )
         if progress is not None:
             progress(step, len(sessions))
@@ -168,7 +185,16 @@ def run_history_backtest(
         target_pct=strategy.target_pct,
         first_session=dates[0] if dates else None,
         last_session=last,
+        stop_text=_stop_words(strategy),
+        symbol=symbol,
+        qualified_sessions=qualified,
     )
+
+
+def _stop_words(strategy: StrategyConfig) -> str:
+    if strategy.stop_pct is None:
+        return f"the {strategy.window_minutes}-minute low or high"
+    return f"{strategy.stop_pct:g}% from the buy or sell price"
 
 
 # ---------------------------------------------------------------- rendering
@@ -339,17 +365,24 @@ def render_backtest(result: MultiDayResult) -> str:
         + "".join(cells)
         + "</div>"
         "<p class='muted' style='font-size:0.7rem;margin:12px 0 0'>Each cell replays the same sessions with a different "
-        "buy/sell distance from the open and a different target. The stop stays at the 15-minute low or high. "
+        f"buy/sell distance from the open and a different target. The stop stays at {_e(result.stop_text)}. "
         "An outlined cell matches the sidebar settings. Picking the best cell on this same data is overfitting.</p></div>"
     )
 
     header = (
         "<div class='orb-bt-head'>"
         f"<span class='orb-title'>Backtest · {result.bar_minutes}-minute data · after costs</span>"
-        "<span class='muted' style='font-size:0.8rem'>All stocks · PDF strategy</span>"
+        f"<span class='muted' style='font-size:0.8rem'>{_e(result.symbol) if result.symbol else 'All stocks'} · PDF strategy</span>"
         "<span class='orb-note'>Zerodha history · paper results</span>"
         "</div>"
     )
+    if result.symbol:
+        header += (
+            "<p class='muted' style='font-size:0.78rem;margin:-4px 0 12px'>"
+            f"Full PDF rules: {_e(result.symbol)} can only trade on days it is in the top sectors and a top mover of its "
+            f"sector. That happened on {result.qualified_sessions} of {head.sessions} sessions in the last "
+            f"{result.headline_days} days. Other stocks are still replayed, so the daily trade limit counts them too.</p>"
+        )
     return (
         BOARD_CSS
         + BT_CSS

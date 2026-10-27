@@ -40,14 +40,17 @@ TABLE_ROWS = 15
 SECTOR_CARDS = 10
 
 SHORT_SECTOR = {
-    "Automobile": "Auto",
+    "Automobile and Auto Components": "Auto",
     "Capital Goods": "Cap Goods",
+    "Construction Materials": "Cement",
     "Consumer Durables": "Durables",
     "Consumer Services": "Cons Svcs",
+    "Fast Moving Consumer Goods": "FMCG",
     "Financial Services": "Finance",
     "Information Technology": "IT",
-    "Infrastructure": "Infra",
+    "Media Entertainment & Publication": "Media",
     "Metals & Mining": "Metals",
+    "Oil Gas & Consumable Fuels": "Oil & Gas",
     "Telecommunication": "Telecom",
 }
 
@@ -125,9 +128,6 @@ class BoardData:
     in_trade: int
     trades_used: int
     max_trades: int
-    day_pnl: float
-    capital: float
-    pnl_series: list[float]
     rows: list[OpportunityRow]
     sector_cards: list[SectorCard]
     performance: list[SectorCard]
@@ -260,23 +260,6 @@ def opportunity_rows(views: list[StockView], choice: str = "All", limit: int = T
     return rows
 
 
-def _pnl_series(day: Day, replay: DayReplay) -> list[float]:
-    """Paper P&L through the day: open trades at the candle close, closed trades at their net."""
-    total = np.zeros(len(day))
-    for trade in replay.trades:
-        row = day.index(trade.symbol)
-        direction = 1.0 if trade.side == BUY else -1.0
-        span = slice(trade.entry_index, trade.exit_index)
-        total[span] += direction * (day.close[row, span] - trade.entry_raw) * trade.quantity
-        total[trade.exit_index:] += trade.net_pnl
-    for position in replay.open_positions:
-        row = day.index(position.symbol)
-        direction = 1.0 if position.side == BUY else -1.0
-        total[position.entry_index:-1] += direction * (day.close[row, position.entry_index:-1] - position.entry) * position.quantity
-        total[-1] += position.net_if_closed
-    return [0.0] + total.tolist()
-
-
 def build_board(
     engine,
     day: Day,
@@ -292,25 +275,8 @@ def build_board(
 ) -> BoardData:
     last = len(day) - 1
     index_series = day.change_pct.mean(axis=0)
-    finance = np.array([sector == "Financial Services" for sector in day.sectors])
-    finance_series = day.change_pct[finance].mean(axis=0) if finance.any() else index_series
-    returns = np.diff(np.log(1.0 + day.change_pct.mean(axis=0) / 100.0))
-    sessions_per_year = 252 * (375 // day.bar_minutes)
-    vol_series = [
-        float(np.std(returns[: i + 1]) * np.sqrt(sessions_per_year) * 100.0) if i >= 4 else 0.0
-        for i in range(len(returns))
-    ]
     ticker = [
         _index_item("Tracked · eq-wt", index_series, "Equal-weight average of the tracked names, base 10,000 at the previous close."),
-        _index_item("Finance · eq-wt", finance_series, "Equal-weight average of the tracked Financial Services names, base 10,000."),
-        TickerItem(
-            "Realized vol · sim",
-            f"{vol_series[-1]:.1f}" if vol_series else "—",
-            None,
-            None,
-            vol_series or [0.0],
-            "Annualized volatility of the equal-weight average so far today. Not India VIX.",
-        ),
     ]
     sector_series = {name: screen.sector_avg[i].tolist() for i, name in enumerate(day.sector_names)}
     ranked = sorted(day.sector_names, key=lambda name: sector_series[name][last], reverse=True)
@@ -331,8 +297,6 @@ def build_board(
         for view in liquid[:mover_limit]
     ]
     changes = np.array([view.change_pct for view in views])
-    pnl = _pnl_series(day, replay)
-    capital = risk.notional_inr * risk.max_daily_trades
     return BoardData(
         clock=engine.clock,
         phase=session_phase(engine.clock.time(), strategy),
@@ -345,9 +309,6 @@ def build_board(
         in_trade=sum(1 for view in views if view.status == TRIGGERED),
         trades_used=len(replay.trades) + len(replay.open_positions),
         max_trades=risk.max_daily_trades,
-        day_pnl=pnl[-1],
-        capital=capital,
-        pnl_series=pnl,
         rows=opportunity_rows(views, choice),
         sector_cards=cards,
         performance=performance,
@@ -457,7 +418,7 @@ BOARD_CSS = """
 .orb-pill.target { color: #22c55e; border-color: #1f7a42; background: transparent; }
 .orb-pill.stop { color: #f87171; border-color: #8a2b2b; background: transparent; }
 .orb-pill.none { color: #8b95a5; border-color: #2a3442; background: transparent; }
-.orb-vwap { display: inline-block; margin-left: 6px; font-family: Inter, 'Segoe UI', system-ui, sans-serif; font-size: 0.66rem; font-weight: 600; }
+.orb-vwap { display: inline-block; margin-left: 6px; vertical-align: middle; white-space: nowrap; font-family: Inter, 'Segoe UI', system-ui, sans-serif; font-size: 0.66rem; font-weight: 600; }
 .orb-steps { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.7rem; margin-left: 6px; }
 .orb-chart-head .sym { font-size: 1.05rem; font-weight: 700; }
 .orb-chart-head .px { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 1.0rem; margin-left: 10px; }
@@ -483,6 +444,12 @@ BOARD_CSS = """
 .orb-sector .n { font-size: 0.78rem; font-weight: 600; }
 .orb-sector .p { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.86rem; font-weight: 600; margin-top: 2px; }
 .orb-sector img { width: 100%; height: 26px; margin-top: 4px; }
+.orb-sector[data-sector] { cursor: pointer; }
+.orb-sector[data-sector]:hover { border-color: #3a4656; }
+.orb-sector.sel { border-color: #2f6fed; background: #13233b; }
+.orb-sector-stocks { margin-top: 12px; background: #111821; border: 1px solid #1f2833; border-radius: 10px; padding: 12px 14px; }
+.orb-sector-stocks .orb-title { font-size: 0.85rem; }
+.orb-sector-stocks .orb-table { margin-top: 8px; }
 .orb-foot { font-size: 0.7rem; color: #8b95a5; margin-top: 12px; }
 .orb-bottom { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 @media (max-width: 1100px) { .orb-bottom { grid-template-columns: 1fr; } }
@@ -570,7 +537,6 @@ def _icon(kind: str, color: str) -> str:
         "bars": f"<rect x='11' y='22' width='4' height='8' fill='{color}'/><rect x='18' y='16' width='4' height='14' fill='{color}'/><rect x='25' y='10' width='4' height='20' fill='{color}'/>",
         "trophy": f"<path d='M13 10h14v6a7 7 0 0 1-14 0z' fill='{color}'/><rect x='18' y='22' width='4' height='5' fill='{color}'/><rect x='14' y='27' width='12' height='3' rx='1' fill='{color}'/>",
         "down": f"<path d='M20 30 L11 19 H17 V10 H23 V19 H29 Z' fill='{color}'/>",
-        "rupee": f"<text x='20' y='27' text-anchor='middle' font-size='19' font-family='Segoe UI, Arial' font-weight='700' fill='{color}'>₹</text>",
     }
     return (
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40' width='40' height='40'>"
@@ -579,7 +545,7 @@ def _icon(kind: str, color: str) -> str:
 
 
 def render_top(board: BoardData) -> str:
-    """Ticker strip and the four summary cards."""
+    """Ticker strip and the three summary cards."""
     ticks = []
     for item in board.ticker:
         color = GREEN if (item.change_pct or 0) >= 0 else RED
@@ -595,13 +561,11 @@ def render_top(board: BoardData) -> str:
             f"{_img(sparkline_svg(item.series, color, 78, 26, False), alt='trend')}</div>"
         )
     ticks.append(
-        f"<div class='orb-updated'>Market clock<b>{board.clock:%H:%M}</b>"
+        f"<div class='orb-updated'>Time<b>{board.clock:%H:%M}</b>"
         f"{_e(board.phase)} · Zerodha, {board.clock:%d %b}</div>"
     )
     total = max(board.advancing + board.declining, 1)
     breadth = "Positive" if board.advancing >= board.declining else "Negative"
-    pnl_pct = board.day_pnl / board.capital * 100.0 if board.capital else 0.0
-    pnl_color = GREEN if board.day_pnl >= 0 else RED
     kpis = [
         _kpi(
             _icon("bars", GREEN), "Market breadth",
@@ -621,12 +585,6 @@ def render_top(board: BoardData) -> str:
             f"<span title='{_e(board.worst.sector)}'>{_e(short_sector(board.worst.sector).upper())}</span>",
             f"<div class='sub'>{_signed_pct(board.worst.change_pct)}</div>{_img(sparkline_svg(board.worst.series, RED), 'spark')}",
         ),
-        _kpi(
-            _icon("rupee", pnl_color), "Daily P&amp;L (paper)",
-            f"<span class='{'up' if board.day_pnl >= 0 else 'down'}'>{'+' if board.day_pnl >= 0 else ''}{_inr(board.day_pnl, 0)}</span>",
-            f"<div class='sub'><span class='{'up' if pnl_pct >= 0 else 'down'}'>{pnl_pct:+.2f}%</span> · after default costs</div>"
-            f"{_img(sparkline_svg(board.pnl_series, pnl_color), 'spark')}",
-        ),
     ]
     return BOARD_CSS + "<div class='orb'><div class='orb-ticker'>" + "".join(ticks) + "</div><div class='orb-kpis'>" + "".join(kpis) + "</div></div>"
 
@@ -642,9 +600,7 @@ def _kpi(icon: str, label: str, value: str, extra: str, icon_is_img: bool = Fals
 def render_opportunities_head() -> str:
     return (
         BOARD_CSS
-        + "<div class='orb'><div class='orb-title'>Top opportunities</div>"
-        "<div class='orb-subtitle'>Candidates from the PDF screen: strongest and weakest sectors, top movers, "
-        "opening range, VWAP. Zerodha data.</div></div>"
+        + "<div class='orb'><div class='orb-title'>Screener</div></div>"
     )
 
 
@@ -667,7 +623,7 @@ def render_table(rows: list[OpportunityRow], selected: str | None) -> str:
     head = (
         "<tr><th class='c-fix0'>#</th><th class='c-fix1'>Stock</th><th>Sector</th>"
         "<th>Price</th><th>Previous day close</th><th>Day high</th><th>Day low</th>"
-        "<th>Window high</th><th>Window low</th><th>% change from previous day</th>"
+        "<th>Time Frame High</th><th>Time Frame Low</th><th>% change from previous day</th>"
         "<th>Volume</th><th>VWAP</th><th>3-day % change</th>"
         "<th>Suggested buy</th><th>Suggested sell</th><th>SL</th>"
         "<th>Signal</th></tr>"
@@ -706,10 +662,10 @@ def render_table(rows: list[OpportunityRow], selected: str | None) -> str:
     return BOARD_CSS + f"<div class='orb orb-table-wrap'><table class='orb-table'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>"
 
 
-# Renders the table HTML from render_table and reports the symbol of a tapped row.
+# Renders board HTML and reports taps: a table row's symbol as 'clicked', a sector card as 'sector'.
 # Registered once here because app.py re-runs on every interaction.
-OPPORTUNITY_TABLE = st.components.v2.component(
-    "orb_opportunity_table",
+CLICKABLE_HTML = st.components.v2.component(
+    "orb_clickable_html",
     js="""
 export default function(component) {
     const { data, setTriggerValue, parentElement } = component;
@@ -726,6 +682,9 @@ export default function(component) {
             row.classList.add('sel');
             setTriggerValue('clicked', row.getAttribute('data-symbol'));
         };
+    });
+    root.querySelectorAll('[data-sector]').forEach((card) => {
+        card.onclick = () => setTriggerValue('sector', card.getAttribute('data-sector'));
     });
 }
 """,
@@ -758,6 +717,7 @@ def chart_svg(chart: ChartData, max_bars: int = 80) -> str:
     top, bottom = 10.0, 236.0
     vol_top, vol_bottom = 248.0, 310.0
     offset = max(0, len(chart.candles) - max_bars)
+    session_open = float(chart.candles["open"].iloc[0]) if len(chart.candles) else float("nan")
     candles = chart.candles.iloc[offset:].reset_index(drop=True)
     ema_fast = chart.ema_fast.iloc[offset:].reset_index(drop=True)
     ema_slow = chart.ema_slow.iloc[offset:].reset_index(drop=True)
@@ -769,6 +729,7 @@ def chart_svg(chart: ChartData, max_bars: int = 80) -> str:
     buy = view.side == BUY
     levels = [
         ("Target", view.target, GREEN),
+        ("Open", session_open, "#64748b"),
         ("Entry", view.order_price, BLUE),
         ("Stop", view.stop, RED),
     ]
@@ -871,7 +832,7 @@ def render_chart_head(chart: ChartData) -> str:
         + "<div class='orb orb-chart-head'>"
         f"<span class='sym'>{_e(chart.symbol)}</span><span class='px'>{_inr(chart.price)}</span>"
         f"<span class='mono' style='margin-left:8px;font-size:0.86rem'>{_signed_pct(chart.change_pct, 1)}</span>"
-        f"<div class='name'>{_e(chart.name)} · NSE</div></div>"
+        f"<div class='name'>{_e(chart.name)} · NSE · Open {_inr(float(chart.candles['open'].iloc[0])) if len(chart.candles) else '—'}</div></div>"
     )
 
 
@@ -881,7 +842,7 @@ def render_chart(chart: ChartData) -> str:
         f"<span><i style='background:{BLUE}'></i>EMA {EMA_FAST}</span>"
         f"<span><i style='background:{ORANGE}'></i>EMA {EMA_SLOW}</span>"
         "<span><i style='background:repeating-linear-gradient(90deg,#cbd5e1 0 4px,transparent 4px 7px)'></i>VWAP</span>"
-        "<span><i class='box'></i>Opening range</span>"
+        "<span><i class='box'></i>Time frame range</span>"
         "</div>"
     )
     return BOARD_CSS + "<div class='orb'>" + legend + _img(chart_svg(chart), "chart", "Price chart") + "</div>"
@@ -901,7 +862,7 @@ def render_plan(view: StockView, notional: float) -> str:
         f"<div class='strength'>Steps passed<b>{passed}/{total}</b>"
         f"<div class='orb-bar'><span style='width:{share * 100:.0f}%;background:{GREEN if passed == total else ORANGE}'></span></div></div>"
         "</div><div class='orb-plan-grid'>"
-        f"<div><div class='k'>{'Buy' if view.side == BUY else 'Sell'} price</div><div class='v'>{_inr(view.order_price)}</div></div>"
+        f"<div><div class='k'>Entry price</div><div class='v'>{_inr(view.order_price)}</div></div>"
         f"<div><div class='k'>Stop loss</div><div class='v down'>{_inr(view.stop)}</div></div>"
         f"<div><div class='k'>Target</div><div class='v up'>{_inr(view.target)}</div></div>"
         f"<div><div class='k'>Position size</div><div class='v'>{quantity} sh</div></div>"
@@ -909,22 +870,63 @@ def render_plan(view: StockView, notional: float) -> str:
     )
 
 
-def render_sectors(board: BoardData) -> str:
+def sector_leaders(views: list[StockView], sector: str, limit: int = 5) -> list[StockView]:
+    """Top gainers of a rising sector or top losers of a falling one, as in step 2."""
+    members = [view for view in views if view.sector == sector]
+    if not members:
+        return []
+    rising = sum(view.change_pct for view in members) >= 0
+    return sorted(members, key=lambda view: view.change_pct, reverse=rising)[:limit]
+
+
+def _sector_stocks(sector: str, views: list[StockView], selected_stock: str | None) -> str:
+    leaders = sector_leaders(views, sector)
+    if not leaders:
+        return ""
+    rising = sum(view.change_pct for view in views if view.sector == sector) >= 0
+    rows = "".join(
+        f"<tr class='{'sel' if view.symbol == selected_stock else ''}' data-symbol='{_e(view.symbol)}' "
+        f"title='Show {_e(view.symbol)} on the chart'>"
+        f"<td class='muted'>{number}</td><td class='sym'>{_e(view.symbol)}</td><td>{_e(view.name)}</td>"
+        f"<td class='num'>{_num(view.price)}</td><td class='num'>{_signed_pct(view.change_pct, 2)}</td>"
+        f"<td class='num'>{view.volume / 100_000:,.1f}L</td>"
+        f"<td class='num'>{_num(view.vwap)}{_vwap_tag(view.price, view.vwap)}</td>"
+        f"<td>{_pill(signal_label(view))}</td></tr>"
+        for number, view in enumerate(leaders, start=1)
+    )
+    return (
+        "<div class='orb-sector-stocks'>"
+        f"<span class='orb-title'>Top {len(leaders)} {'gainers' if rising else 'losers'} · {_e(sector)}</span>"
+        "<div class='orb-table-wrap'><table class='orb-table'><thead><tr><th>#</th><th>Stock</th><th>Company</th>"
+        "<th>Price</th><th>% change from previous day</th><th>Volume</th><th>VWAP</th><th>Signal</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div></div>"
+    )
+
+
+def render_sectors(
+    board: BoardData,
+    selected: str | None = None,
+    views: list[StockView] | None = None,
+    selected_stock: str | None = None,
+) -> str:
+    """Sector cards. A tapped card (``selected``) gets its top five stocks listed underneath."""
     cards = []
     for card in board.sector_cards:
         color = GREEN if card.change_pct >= 0 else RED
         cards.append(
-            f"<div class='orb-sector'><div class='n'>{_e(short_sector(card.sector))}</div>"
+            f"<div class='orb-sector{' sel' if card.sector == selected else ''}' data-sector='{_e(card.sector)}' "
+            f"title='Show the top five stocks in {_e(card.sector)}'><div class='n'>{_e(short_sector(card.sector))}</div>"
             f"<div class='p {'up' if card.change_pct >= 0 else 'down'}'>{card.change_pct:+.2f}%</div>"
             f"{_img(sparkline_svg(card.series, color), alt='trend')}</div>"
         )
+    stocks = _sector_stocks(selected, views, selected_stock) if selected and views else ""
     return (
         BOARD_CSS
         + "<div class='orb'><div class='orb-sectors-head'><span class='orb-title'>Sector momentum</span>"
-        "<span class='muted' style='font-size:0.74rem'>(tracked names, illustrative sectors)</span>"
+        "<span class='muted' style='font-size:0.74rem'>(chosen stock list, NSE industries · tap a sector for its top 5 stocks)</span>"
         "<div class='orb-tf'><span class='on'>1D</span>"
         "<span title='Needs several days of real history'>1W</span><span title='Needs several days of real history'>1M</span></div></div>"
-        f"<div class='orb-sectors'>{''.join(cards)}</div></div>"
+        f"<div class='orb-sectors'>{''.join(cards)}</div>{stocks}</div>"
     )
 
 
@@ -967,9 +969,9 @@ def render_bottom(board: BoardData) -> str:
         "It is an estimate, not the order book.</p></div>"
         "</div>"
         "<p class='orb-foot'>LIVE DATA from Zerodha Kite Connect, read-only. Candles are one-minute bars built from the "
-        "exchange feed; sector labels are an illustrative mapping. "
+        "exchange feed; sectors are NSE's industry groups. "
         "WAIT means every PDF step passed and the order "
-        "fills only if a later candle trades at the suggested price. The stop-loss is the 15-minute low (buy) or high (short). "
+        "fills only if a later candle trades at the suggested price. The stop-loss is the opening-window low (buy) or high (short), or the SL % chosen in the sidebar. "
         "Steps x/7 counts the PDF steps passed on the latest closed candle; it is not a probability. "
         "Signals are paper signals, not advice. No order is sent.</p></div>"
     )

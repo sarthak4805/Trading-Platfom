@@ -14,6 +14,8 @@ Bullish (buy)
     10. Buy only when the price and the buy price are above VWAP.
 Bearish (short) is the mirror: weakest sectors, top losers, change below -1.5%,
 sell at open + 0.5%, stop at the 15-minute high, target 1.5% lower, below VWAP.
+These are the PDF defaults. ``StrategyConfig`` can change the window length and
+replace the window stop with a fixed percentage from the buy or sell price.
 
 Every decision uses closed candles only. A step evaluated on candle t places an
 order for candle t + 1. On the fill candle only the stop can trigger, because the
@@ -66,6 +68,7 @@ class StrategyConfig:
     min_volume: int = 1_000_000
     entry_offset_pct: float = 0.5
     target_pct: float = 1.5
+    stop_pct: float | None = None  # None: the opening-window low (buy) or high (short), as in the PDF
     observation_start: time = time(9, 15)
     signal_start: time = time(9, 30)
     no_new_entries_after: time = time(15, 0)
@@ -74,7 +77,7 @@ class StrategyConfig:
     def __post_init__(self) -> None:
         if not (self.observation_start < self.signal_start < self.session_end):
             raise ValueError(
-                "The 15-minute window must start before signals, and signals must start "
+                "The opening window must start before signals, and signals must start "
                 "before the session end. Defaults are 09:15, 09:30, and 15:30."
             )
         if not (self.signal_start < self.no_new_entries_after <= self.session_end):
@@ -90,6 +93,20 @@ class StrategyConfig:
             raise ValueError("The entry offset from the open cannot be negative.")
         if self.target_pct <= 0:
             raise ValueError("The target must be greater than zero.")
+        if self.stop_pct is not None and self.stop_pct <= 0:
+            raise ValueError("A percentage stop-loss must be greater than zero.")
+
+    @property
+    def window_minutes(self) -> int:
+        """Length of the opening window (09:15 to 09:30 is 15)."""
+        start = self.observation_start.hour * 60 + self.observation_start.minute
+        return self.signal_start.hour * 60 + self.signal_start.minute - start
+
+    def stop_text(self, buy: bool = True) -> str:
+        """Where the stop-loss sits, in words."""
+        if self.stop_pct is None:
+            return f"the {self.window_minutes}-minute {'low' if buy else 'high'}"
+        return f"{self.stop_pct:g}% {'below the buy' if buy else 'above the sell'} price"
 
 
 @dataclass(frozen=True)
@@ -396,8 +413,12 @@ def entry_levels(day: Day, config: StrategyConfig, screen: Screen) -> Entries:
     target = config.target_pct / 100.0
     buy_price = np.round(day.session_open * (1.0 - offset), 2)
     short_price = np.round(day.session_open * (1.0 + offset), 2)
-    buy_stop = day.window_low
-    short_stop = day.window_high
+    if config.stop_pct is None:
+        buy_stop, short_stop = day.window_low, day.window_high
+    else:
+        stop = config.stop_pct / 100.0
+        buy_stop = np.round(buy_price * (1.0 - stop), 2)
+        short_stop = np.round(short_price * (1.0 + stop), 2)
     with np.errstate(invalid="ignore"):
         buy_stop_ok = np.isfinite(buy_stop) & (buy_stop < buy_price)
         short_stop_ok = np.isfinite(short_stop) & (short_stop > short_price)
@@ -615,16 +636,22 @@ def step_results(day: Day, config: StrategyConfig, screen: Screen, entries: Entr
     if not np.isfinite(stop) or day.times[index] < config.signal_start:
         results.append(RuleResult(
             "Steps 6-8", False,
-            f"The 15-minute range ({config.observation_start:%H:%M} to {config.signal_start:%H:%M}) is still forming.",
+            f"The {config.window_minutes}-minute range ({config.observation_start:%H:%M} to "
+            f"{config.signal_start:%H:%M}) is still forming.",
         ))
     else:
         word = "buy" if buy else "sell"
-        results.append(RuleResult(
-            "Steps 6-8", ok,
+        intro = (
             f"Open {opening:.2f}, so the suggested {word} price is {price:.2f} "
-            f"({'-' if buy else '+'}{config.entry_offset_pct:g}%). The 15-minute {level} {stop:.2f} is {relation} it"
-            + (", so it can be the stop-loss." if ok else ", so a stop-loss there would be on the wrong side."),
-        ))
+            f"({'-' if buy else '+'}{config.entry_offset_pct:g}%). "
+        )
+        if config.stop_pct is None:
+            detail = f"The {config.window_minutes}-minute {level} {stop:.2f} is {relation} it" + (
+                ", so it can be the stop-loss." if ok else ", so a stop-loss there would be on the wrong side."
+            )
+        else:
+            detail = f"The stop-loss is {config.stop_text(buy)}, at {stop:.2f}."
+        results.append(RuleResult("Steps 6-8", ok, intro + detail))
     vwap = float(day.vwap[row, index])
     close = float(day.close[row, index])
     if buy:

@@ -1,4 +1,4 @@
-# NIFTY 100 Intraday Research Desk
+# NSE Intraday Research Desk
 
 A local Streamlit desk that runs the bullish / bearish strategy from the strategy PDF on real NSE data from Zerodha Kite Connect: sector screen, opening range, offset entries, VWAP filter, stop at the 15-minute low or high, and a backtest on past sessions.
 
@@ -36,31 +36,29 @@ During market hours the app subscribes to the Kite WebSocket feed and builds the
 
 ## How the desk is organized
 
-The sidebar holds the Zerodha status, the strategy settings from the PDF, the paper-risk limits, and the movers-sector picker. It starts closed; open it with the arrow at the top left.
+The sidebar holds the Zerodha status, the **Stock list** picker, the strategy settings from the PDF, the paper-risk limits, and the movers-sector picker. It starts closed; open it with the arrow at the top left.
+
+**Stock list** chooses which stocks the app loads and screens: NIFTY 50, NIFTY 100 (the default), NIFTY 500, NIFTY F&O (every stock with futures on Zerodha), or All (NIFTY 500 plus any F&O stock outside it). Changing it downloads that list again. Each stock needs two history requests and Kite allows about three a second, so NIFTY 50 loads in well under a minute, NIFTY 100 in about a minute, F&O in about 2-3 minutes, and NIFTY 500 or All in about 6 minutes. The backtest history download takes about as long again in the background. Sector ranking in step 1 uses only the stocks in the chosen list.
 
 ### Opening-range board
 
-- A ticker strip with NIFTY 100, NIFTY BANK, and INDIA VIX from Zerodha, and the market clock. If Zerodha returns no index candles, an equal-weight average of the tracked names stands in, labelled "eq-wt".
-- Four cards: market breadth, best and weakest sector, and daily paper P&L after default costs.
-- **Top opportunities**: candidates from the sector screen plus anything that traded today, with entry, stop, target, reward-to-risk, a signal (BUY or SHORT while in a trade, WAIT for a waiting order, TARGET, STOPPED, CLOSED, or NO TRADE), and how many PDF steps passed. The filter switches between All, Long, Short, and Waiting. Tap a row to open that stock in the chart and trade plan on the right. The step count is not a probability.
-- The chart for the chosen stock in 5-minute or 1-minute candles, with EMA 9 and 21, VWAP, the shaded 15-minute range, and the entry, stop, and target. The EMA lines are for reading the picture only. Below it, the trade plan and a **Review setup** button that lists every step.
-- **Sector momentum** for the five strongest and five weakest sectors today, and **Sector performance** and **movers** cards at the bottom. The movers buyer-share bar is estimated from up-minute volume; it is not the order book.
+- A ticker strip with NIFTY 100 from Zerodha and the time of the latest closed minute. If Zerodha returns no index candles, an equal-weight average of the tracked names stands in, labelled "eq-wt".
+- Three cards: market breadth, and the best and weakest sector.
+- **Screener**: candidates from the sector screen plus anything that traded today, with the step-11 columns (the opening-window high and low are labelled Time Frame High and Time Frame Low; VWAP shows Above or Below under the value), a signal (BUY or SHORT while in a trade, WAIT for a waiting order, TARGET, STOPPED, CLOSED, or NO TRADE), and how many PDF steps passed. The filter switches between All, Long, Short, and Waiting. Tap a row to open that stock in the chart and trade plan on the right. The step count is not a probability.
+- The chart for the chosen stock in 5-minute or 1-minute candles, with EMA 9 and 21, VWAP, the shaded time-frame range, and the opening price, entry, stop, and target. The EMA lines are for reading the picture only. Below it, the trade plan (entry price, stop loss, target, position size) and a **Review setup** button that lists every step.
+- **Sector momentum** for the five strongest and five weakest sectors today. Tap a sector card to list its top five stocks underneath (top gainers of a rising sector, top losers of a falling one); tap it again to hide them, and tap a stock to open it in the chart. **Sector performance** and **movers** cards sit at the bottom. The movers buyer-share bar is estimated from up-minute volume; it is not the order book.
 
-### Market overview, Stock screener, Sector analysis
+### Market overview
 
-Breadth, strongest and weakest sector, a searchable and sortable table of every tracked stock, top gainers and losers, and the sector ranking used in step 1. Change is always measured from the previous session's close.
+Market status, breadth, the strongest and weakest sector, and the session date. Change is always measured from the previous session's close.
 
 ### Stock detail
 
-One stock's one-minute candles with VWAP, volume, the 15-minute range, and the order, stop, and target lines; its step-11 table; every step that passed or failed; and the paper plan with its quantity.
-
-### Signals
-
-Waiting buy and short orders, open and closed trades, the daily limit, and the step-11 tables for bullish candidates (top gainers in the strongest sectors) and bearish candidates (top losers in the weakest sectors). Pick any stock to read its steps.
+One stock's one-minute candles with VWAP, volume, the time-frame range, and the order, stop, and target lines; its step-11 table; every step that passed or failed; the PDF steps with the current settings; and the paper plan with its quantity.
 
 ### Backtesting
 
-Pick 5-minute or 1-minute candles and the last 30 or 60 days, then click **Run backtest**. Right after you log in, the app starts downloading every stock's one-minute and daily history for the last 60 days in the background, three stocks at a time within Kite's request limit (about a minute or two). The Backtesting tab shows the progress, and once it finishes a run only replays the data, which takes a few seconds. History stays in memory until the app restarts; nothing is written to disk. Each session is screened and replayed with the sidebar settings. The page shows net P&L after costs, win rate, maximum drawdown, profit factor, an equity curve, a 30 / 60-day comparison, and a target × entry-offset grid. Choosing the best grid cell on the same data is overfitting.
+Pick **All stocks** or one stock from the Screener table, 5-minute or 1-minute candles, and the last 30 or 60 days, then click **Run backtest**. A single stock uses the full PDF rules: every stock is still replayed, because the sector ranking and the daily trade limit depend on all of them, and only the chosen stock's trades are counted. The page says on how many sessions it was in the top sectors and a top mover of its sector. Right after you log in, the app starts downloading every stock's one-minute and daily history for the last 60 days in the background, three stocks at a time within Kite's request limit (about a minute for NIFTY 100, about 6 minutes for NIFTY 500). The Backtesting tab shows the progress, and once it finishes a run only replays the data, which takes a few seconds. History stays in memory until the app restarts; nothing is written to disk. Each session is screened and replayed with the sidebar settings. The page shows net P&L after costs, win rate, maximum drawdown, profit factor, an equity curve, a 30 / 60-day comparison, and a target × entry-offset grid. Choosing the best grid cell on the same data is overfitting.
 
 ## Strategy (from the PDF)
 
@@ -90,7 +88,7 @@ Timing:
 - On the fill candle only the stop can trigger, because the order of prices inside that candle is unknown. After that, if a candle touches both the stop and the target, the stop is assumed first. A candle that opens beyond a level fills at that open.
 - One trade per stock per day. At most 5 trades per day across all stocks, taken in the order they fill (alphabetical on a tie).
 
-All thresholds and times are editable in the sidebar. VWAP uses the typical price `(high + low + close) / 3`.
+All thresholds and times are editable in the sidebar. Dropdowns set the **Time frame** (opening window of 5, 15, 30, or 60 minutes from 09:15; the PDF uses 15), **Volume today** (all, more than 1, 5, or 10 lakh), **Buy at** (0.5% to 3% from the open), **SL** (the window low / high as in the PDF, or 0.5% to 3% from the buy or sell price), and **Book profit** (0.5% to 3%). The defaults are the PDF values. VWAP uses the typical price `(high + low + close) / 3`.
 
 ## Risk and costs
 
@@ -113,7 +111,8 @@ market_data.py          Market clock constants (IST, 09:15 open, 15:30 close)
 indicators.py           Candle checks, percent change, VWAP
 risk_manager.py         Size, daily limit, intraday-only rules
 backtest.py             Paper P&L, slippage, charges, stop-first exits
-universe.py             The 100 tracked names and their sectors
+universe.py             NIFTY 50 / 100 / 500 / F&O / All stock lists
+nse_indices.csv         NSE's NIFTY 500 members with industry and NIFTY 50 / 100 flags
 tests/                  Strategy, board, backtest, live-data, risk, and indicator tests
 ```
 
@@ -121,7 +120,7 @@ Tests use a small test-only candle builder and a fake Kite client in `tests/`, s
 
 ## Limits
 
-- The stock list and sector labels are a working sample, not a verified copy of the current NIFTY 100.
+- `nse_indices.csv` is a copy of NSE's index files (`ind_nifty50list.csv`, `ind_nifty100list.csv`, `ind_nifty500list.csv` on archives.nseindia.com) from 27 Oct 2026. NSE reviews the indices twice a year, so refresh the file after a review. Sectors are NSE's industry groups; F&O stocks outside NIFTY 500 are labelled "Other".
 - One-minute candles do not reveal which level was hit first inside a minute, so the replay assumes the stop.
 - Candles built from the live feed can differ slightly from Zerodha's own minute candles.
 - Costs are assumptions until you verify them against your broker's current charges.

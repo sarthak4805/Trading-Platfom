@@ -1,7 +1,7 @@
 """Paper position limits: size, daily trade count, and intraday-only holds.
 
-The stop-loss and target come from the strategy (the 15-minute low or high, and
-a percent target from the order price). Nothing here places an order.
+The stop-loss and target come from the strategy (the opening-window low or high or
+a percent stop, and a percent target from the order price). Nothing here places an order.
 """
 
 from __future__ import annotations
@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 
 RISK_LIMITATIONS: tuple[str, ...] = (
-    "The stop-loss is the 15-minute low for a buy or the 15-minute high for a short. It is a paper-trading rule, not a guarantee.",
+    "The stop-loss is the opening-window low for a buy or the window high for a short (15 minutes in the PDF), "
+    "or the SL % chosen in the sidebar. It is a paper-trading rule, not a guarantee.",
     "A gap can open through the stop-loss. When that happens, the replay fills at the open rather than at the stop.",
     "On the candle where an order fills, only the stop can trigger. After that, a candle that touches both the stop and the target counts as a stop.",
     "Slippage and transaction costs are configurable assumptions. They are not a verified Zerodha fee schedule.",
